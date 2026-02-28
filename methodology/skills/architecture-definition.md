@@ -1,6 +1,6 @@
 # Architecture Definition
 
-Use this skill to define or update `architecture/main.md`.
+Use this skill to define or update `architecture/ARCHITECTURE.md`.
 
-`architecture/main.md` should follow the template found in `.methodology/templates/architecture-template.md`
+`architecture/ARCHITECTURE.md` should follow the template found in `.methodology/templates/architecture-template.md`
 

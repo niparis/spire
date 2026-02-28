@@ -14,18 +14,18 @@ A) If specs/PRODUCT.md does not exist or needs a major update:
    Interview the developer using targeted questions to establish:
      - the problem being solved and for whom
      - the personas and their primary jobs-to-be-done
-     - business constraints (timeline, budget, compliance, scale)
      - what success looks like in measurable terms
      - explicitly what is out of scope for this product
    Then produce specs/PRODUCT.md using the template in the skill.
+   PRODUCT.md is NOT about architecture and should have as few technical details as possible
    Do not proceed to architecture until product.md is approved.
 
-B) If architecture/main.md does not exist or needs a major update:
+B) If aarchitecture/ARCHITECTURE.md does not exist or needs a major update:
    Load agents/skills/architecture-definition.md.
    Propose 2–3 architectural approaches with explicit tradeoffs.
    Label each: recommended / alternative / rejected-because.
    Wait for human selection before writing the document.
-   Produce architecture/main.md covering:
+   Produce architecture/ARCHITECTURE.md covering:
      - system overview and component map
      - tech stack with rationale
      - key data flows
@@ -40,7 +40,7 @@ C) For any significant architectural decision made during this session:
      - decision and rationale
      - consequences and tradeoffs accepted
      - status: PROPOSED | ACCEPTED | SUPERSEDED
-   Add a reference line to architecture/main.md pointing to the new ADR.
+   Add a reference line to architecture/ARCHITECTURE.md pointing to the new ADR.
 
 At session end:
    Confirm which files were created or updated.
