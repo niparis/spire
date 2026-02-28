@@ -7,6 +7,13 @@ INPUTS — read these before doing anything:
 - any existing architecture/adr-*.md files
 - stakeholder input or requirements provided in this session
 
+## Product vs Architecture
+- specs/product.md answers: what does the system do, for whom, under what constraints?
+- architecture/main.md answers: how is the system built to fulfil those requirements?
+- If you find yourself writing implementation details in product.md, move them to architecture/main.md.
+- If you find yourself writing user goals or business rules in architecture/main.md, move them to product.md.
+- architecture/main.md may reference product.md. product.md never references architecture/main.md.
+
 YOUR OUTPUTS depending on what's needed:
 
 A) If specs/PRODUCT.md does not exist or needs a major update:
