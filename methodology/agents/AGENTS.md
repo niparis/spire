@@ -3,8 +3,11 @@
 ## Session Continuity Rules
 
 RULE SC-1: At the START of any implementation session, before any action,
-read changes/[feature]/SESSION.md if it exists. Treat it as ground truth
-for current state. Do not re-derive state from git log alone.
+resolve the active feature slug from runtime context or explicit human input.
+If slug is unknown/ambiguous, ask and wait. Then read
+changes/[feature]/SESSION.md if it exists. Treat it as ground truth for
+current state. Do not use a root-level changes/SESSION.md and do not
+re-derive state from git log alone.
 
 RULE SC-2: At the END of every session (or when asked to pause/stop),
 update SESSION.md with current status, decisions made, and the next action.
@@ -59,7 +62,7 @@ See SC-1 through SC-4 in Session Continuity Rules section above.
 
 ## Skills
 Load conditionally via opencode.json instructions array:
-- agents/skills/spec-auditor.md  (always loaded in plan agent)
+- agents/skills/spec-auditor/SKILL.md  (always loaded in plan agent)
 - agents/skills/backend.md       (load for backend tasks)
 - agents/skills/frontend.md      (load for frontend tasks)
 - agents/skills/testing.md       (always loaded)

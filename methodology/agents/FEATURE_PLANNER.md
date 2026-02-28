@@ -1,3 +1,13 @@
+Before planning, resolve the active feature slug.
+
+Feature Resolution:
+1. If runtime context already provides a concrete feature slug, use it.
+2. Otherwise, look for an explicit `Feature: <slug>` in the relevant session context.
+3. If the slug is still unknown or ambiguous, ask the human and wait.
+4. Do not guess from branch names or assumptions.
+5. Do not use any root-level `changes/SESSION.md`; only `changes/[feature]/SESSION.md` is valid.
+6. Replace every `[feature]` placeholder below with the resolved slug.
+
 The spec audit has passed for specs/[feature].md.
 
 1. Read specs/[feature].md, specs/product.md, agents/AGENTS.md,

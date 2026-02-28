@@ -1,0 +1,209 @@
+# PLAN.md — spire CLI
+Feature: 001-spire-cli
+Status: APPROVED
+Date: 2026-02-28
+
+---
+
+## Context
+
+`spire` is a Go CLI that manages the SDD methodology lifecycle across projects.
+It has two responsibilities: distributing the global methodology files (install/update),
+and scaffolding local project artefacts (init, new, status).
+
+It is intentionally not an OpenCode wrapper. It manages files. OpenCode manages agents.
+
+---
+
+## Chosen Approach
+
+**Pure Go CLI, single static binary, GitHub-hosted releases.**
+
+Alternatives considered:
+
+- **Pure bash** — zero compile step, but weaker maintainability and testability
+  for parsing, templating, and cross-platform behavior.
+  Rejected: long-term reliability and DX are better in Go.
+
+- **Node.js CLI (e.g. via npm)** — rich UX, but requires Node/npm runtime.
+  Rejected: runtime dependency not guaranteed everywhere.
+
+- **Python script** — stronger ergonomics than bash, but interpreter/version/env
+  ambiguity on target machines.
+  Rejected: still runtime-dependent.
+
+- **Pure Go** (chosen) — single compiled binary, strong stdlib for files/templates,
+  native testing, straightforward cross-compilation, no runtime dependency.
+
+---
+
+## Repository Structure (methodology repo)
+
+```
+opencode-spire/
+│
+├── cmd/
+│   └── spire/
+│       └── main.go                  ← CLI entrypoint
+│
+├── internal/
+│   ├── cli/                         ← command routing + help/version
+│   ├── commands/                    ← init/update/new/status handlers
+│   ├── methodology/                 ← clone/fetch/update behaviors
+│   ├── scaffold/                    ← template rendering + file creation
+│   └── status/                      ← status inference + table output
+│
+├── methodology/                     ← distributed methodology content
+│   ├── skills/
+│   ├── agents/
+│   ├── templates/
+│   └── project_root/               ← files projected to repo root
+│       ├── local_agents.md
+│       └── manifest.json
+│
+├── scripts/
+│   └── install.sh                   ← curl | bash installer for binaries
+│
+├── tests/
+│   └── e2e/                         ← optional integration tests
+│
+├── go.mod
+├── go.sum
+├── CHANGELOG.md
+└── README.md
+```
+
+---
+
+## Command Behavior
+
+### `spire init` (run once per project)
+- Fails if already initialised (`.methodology/` exists)
+- Fetches methodology content into `.methodology/`
+  (default: shallow git clone + sparse checkout of `methodology/`)
+- Treats `.methodology/` as a recursive payload sync target (no hardcoded file list)
+- Adds `.methodology/` to `.gitignore` (no duplicate entry)
+- Applies `project_root/manifest.json` mappings from `.methodology/project_root/`
+  to project root (for example, `local_agents.md` -> `AGENTS.md`)
+- Uses per-file policy from manifest (`if_missing`, `never_overwrite`, etc.)
+- Never overwrites existing local files
+- Prints next steps
+
+### `spire update`
+- Fails if `.methodology/` missing (`Run spire init first.`)
+- Detects local edits inside `.methodology/` and warns
+- In interactive mode: asks confirmation to continue
+- In non-interactive mode: aborts safely when dirty
+- Pulls latest methodology content
+- Prints changed methodology files
+- Re-evaluates `project_root/manifest.json` mappings after sync
+- Does not overwrite user-modified root files; prints notice when upstream template
+  changed but policy blocks overwrite
+
+### `spire new`
+- Scans `specs/feature-*.md` to compute next numeric id (`max+1`, padded 3 digits)
+- Prompts for feature name (kebab-case normalization)
+- Creates `specs/feature-<N>-<name>.md` from `specs/_template.md` with substitutions
+- Creates `changes/<N>-<name>/SESSION.md` from methodology session template
+- Prints next-step guidance
+
+### `spire status`
+- Scans all `specs/feature-*.md` (excluding template/audit files)
+- Infers state from associated files:
+  - Spec only
+  - Awaiting planning
+  - Awaiting implementation
+  - In progress (from `SESSION.md` Status line)
+  - Awaiting PR
+  - Complete
+- Prints aligned table (`#`, `Feature`, `Status`)
+
+---
+
+## Delivery / Installation
+
+- Build release binaries for:
+  - `darwin/arm64` (Apple Silicon)
+  - `darwin/amd64`
+  - `linux/amd64`
+  - `linux/arm64`
+- Publish binaries as GitHub Release assets
+- `scripts/install.sh` detects OS/arch, downloads correct binary, installs to:
+  - macOS: `/usr/local/bin` (fallback `~/bin`)
+  - Linux: `~/.local/bin` (fallback `~/bin`)
+- Installer checks PATH and prints guidance if missing
+
+---
+
+## File-by-File Change List
+
+```
+opencode-spire/
+  cmd/spire/main.go               CREATE
+  internal/cli/*.go               CREATE
+  internal/commands/*.go          CREATE
+  internal/methodology/*.go       CREATE
+  internal/scaffold/*.go          CREATE
+  internal/status/*.go            CREATE
+  methodology/project_root/manifest.json  CREATE
+  scripts/install.sh              CREATE
+  methodology/                    CREATE (existing content copied)
+  CHANGELOG.md                    CREATE
+  README.md                       CREATE
+  .github/workflows/ci.yaml       CREATE
+```
+
+---
+
+## Test Strategy
+
+**Unit + command tests (Go):**
+- `go test ./...`
+- Table-driven tests for:
+  - command routing/help/version
+  - numbering and slug normalization
+  - status inference
+  - gitignore idempotency
+  - template substitution
+  - manifest parsing and mapping policy behavior
+
+**Integration tests:**
+- Temp-dir workflow tests:
+  - init happy path + no-overwrite behavior
+  - init applies project_root mappings (`local_agents.md` -> `AGENTS.md`)
+  - update dirty warning + prompt behavior
+  - update reports project_root template changes without overwriting protected files
+  - new creates expected files
+  - status outputs expected states/table
+
+**Manual smoke test checklist** (run before any release tag):
+- Fresh macOS Apple Silicon machine
+- Fresh Ubuntu machine
+- Project with existing AGENTS.md (confirm not overwritten on init)
+- Dirty `.methodology/` (confirm update warns)
+
+---
+
+## Rollback Plan
+
+`spire` only creates/updates project metadata files and `.methodology/`.
+Rollback is deleting generated files or reverting via git.
+No project source code changes are performed by design.
+
+---
+
+## CI/CD
+
+GitHub Actions on the `opencode-spire` repo:
+
+- `test` job (ubuntu-latest): `go test ./...`
+- `test-macos` job (macos-latest): `go test ./...`
+- `build-release` job (tags only): cross-compile and upload release assets
+
+Installer installs latest tagged release binary, not `main`.
+
+---
+
+## Open Questions
+
+None.
