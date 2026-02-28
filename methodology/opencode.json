@@ -10,7 +10,19 @@
         ".methodology/agents/FEATURE_PLANNER.md",
         ".methodology/skills/spec-auditor/SKILL.md",
         "AGENTS.md"
-      ]
+      ],
+      "permissions": {
+        "edit": {
+          "*": "deny",
+          "**/*.md": "allow",
+          "**/*.mdx": "allow"
+        },
+        "write": {
+          "*": "deny",
+          "**/*.md": "allow",
+          "**/*.mdx": "allow"
+        }
+      }
     },
     "default": {
       "instructions": [
@@ -19,6 +31,23 @@
         ".methodology/skills/verification.md",
         "AGENTS.md"
       ]
+    },
+    "verification": {
+      "instructions": [
+        ".methodology/agents/VERIFICATION.md",
+        ".methodology/skills/verification.md",
+        "AGENTS.md"
+      ],
+      "permissions": {
+        "edit": {
+          "*": "deny",
+          "changes/**/*.md": "allow"
+        },
+        "write": {
+          "*": "deny",
+          "changes/**/*.md": "allow"
+        }
+      }
     },
     "ProductEngineer": {
       "instructions": [
