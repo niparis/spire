@@ -2,8 +2,5 @@
 
 Use this skill to shape `specs/PRODUCT.md`.
 
-Capture:
-- Problem statement and target users
-- Primary jobs-to-be-done
-- Success metrics
-- Constraints and non-goals
+`specs/PRODUCT.md` should follow the template found in `.methodology/templates/product-template.md`
+
