@@ -201,6 +201,78 @@ Format per task: Goal / Files / Tests to add / Verification step.
 
 ---
 
+## Phase 6 — Agent Gating and Verification
+
+### Task 014 — Plan mode Markdown-only write permissions
+**Goal:** Allow planning agents to write planning artifacts while preventing non-markdown edits.
+**Files:**
+- `methodology/opencode.json`
+- `methodology/templates/opencode.json`
+**Changes:**
+- Configure `agent.plan.edit` with deny-by-default and allow `**/*.md` (optionally `**/*.mdx`).
+- Configure `agent.plan.write` with deny-by-default and allow `**/*.md` (optionally `**/*.mdx`).
+**Tests:**
+- Config validation test/lint (JSON schema or fixture-based validation in repo tests).
+**Verification:**
+- In plan mode, writing `changes/<feature>/PLAN.md` is allowed.
+- In plan mode, editing non-markdown code files is denied.
+
+---
+
+### Task 015 — Add dedicated Gate 4 verification agent profile
+**Goal:** Separate implementation from verification with a first-class verifier role.
+**Files:**
+- `methodology/agents/VERIFICATION.md` (new)
+- `methodology/opencode.json`
+- `methodology/templates/opencode.json`
+**Changes:**
+- Add a `verification` agent profile wired to verification instructions.
+- Ensure verifier role is configured for report production, not feature implementation.
+**Tests:**
+- Config fixture test that `verification` profile resolves expected instruction files.
+**Verification:**
+- Verification agent can run independently and produce gate output artifacts.
+
+---
+
+### Task 016 — Enforce verification report schema and verdict rules
+**Goal:** Make Gate 4 output deterministic and PR-gating ready.
+**Files:**
+- `methodology/skills/verification.md`
+- `methodology/agents/CODE.md`
+- `methodology/agents/FEATURE_PLANNER.md`
+- `methodology/agents/AGENTS.md`
+**Changes:**
+- Define mandatory `VERIFICATION_REPORT.md` sections:
+  - Traceability Matrix
+  - Commands Run
+  - Coverage Summary
+  - Self-Review
+  - Verdict
+- Add hard rule: do not open PR when verdict is `NEEDS WORK`.
+- Clarify handoff: code agent finishes implementation and defers final gate decision to verifier.
+**Tests:**
+- Documentation consistency check (references to Gate 4 sections and verdict rule).
+**Verification:**
+- A generated report can be reviewed against the schema with no missing sections.
+
+---
+
+### Task 017 — Define verification independence policy
+**Goal:** Reduce self-review bias by running Gate 4 in an independent context.
+**Files:**
+- `methodology/agents/VERIFICATION.md`
+- `methodology/agents/AGENTS.md`
+- `README.md`
+**Changes:**
+- Document preferred operating rule: run verification in a separate OpenCode session.
+- Document minimum rule: verifier must not be the same active implementation run.
+**Tests:** None (policy/documentation).
+**Verification:**
+- Process docs explicitly describe when and how Gate 4 must be executed.
+
+---
+
 ## Task Summary
 
 | # | Task | Phase | Estimated time |
@@ -218,8 +290,12 @@ Format per task: Goal / Files / Tests to add / Verification step.
 | 011 | e2e flow test | Quality | 15 min |
 | 012 | docs + changelog | Release prep | 10 min |
 | 013 | release tag validation | Release | 10 min |
+| 014 | plan markdown-only permissions | Agent gating | 10 min |
+| 015 | verification agent profile | Agent gating | 10 min |
+| 016 | verification schema + PR gate rule | Agent gating | 15 min |
+| 017 | verification independence policy | Agent gating | 10 min |
 
-Total: ~3.0-3.5 hours of implementation time.
+Total: ~3.5-4.0 hours of implementation time.
 
 ---
 
@@ -237,3 +313,6 @@ Total: ~3.0-3.5 hours of implementation time.
 | AC-8 | spire status shows correct state | internal/status/infer.go | status tests |
 | AC-9 | Works on macOS and Linux | build + runtime | CI matrix |
 | AC-10 | No runtime dependency beyond binary (no required git/env var for init/update) | command layer | integration + docs |
+| AC-11 | Plan mode can write markdown planning artifacts only | methodology/opencode.json | config validation + manual |
+| AC-12 | Gate 4 is executed by dedicated verification role | methodology/agents/VERIFICATION.md | process validation |
+| AC-13 | PR is blocked when verification verdict is NEEDS WORK | methodology/skills/verification.md | documentation + workflow checks |

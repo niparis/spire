@@ -36,4 +36,9 @@ ask for spec correction before continuing planning.
    - each task has: goal, files to touch, tests to add, verification step
    - ordered by dependency
 
+7. Include explicit Gate 4 handoff criteria in the plan/tasks:
+   - verification is executed by the verification agent
+   - required output is changes/[feature]/VERIFICATION_REPORT.md
+   - PR is blocked when verification verdict is NEEDS WORK
+
 NO code changes. NO file edits outside changes/[feature]/. This is Plan mode.

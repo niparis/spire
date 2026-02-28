@@ -30,6 +30,8 @@ proceeding. Do not silently work around it.
 - Run lint + typecheck + tests after every logical changeset
 - Commit with format: "type: description — satisfies AC-n"
 - Log all decisions in SESSION.md under Closed Decisions
+- Run Gate 4 verification and produce changes/[feature]/VERIFICATION_REPORT.md before PR
+- Prefer running Gate 4 verification in a separate OpenCode session from implementation
 
 ### Ask Before
 - Modifying any file outside the current feature's task scope
@@ -42,6 +44,8 @@ proceeding. Do not silently work around it.
 - Proceed past a FAIL or unresolved CONDITIONAL audit verdict
 - Attempt the same failing fix more than 3 times (invoke SC-3 instead)
 - Open a PR without a VERIFICATION_REPORT.md
+- Open or request a PR when verification verdict is NEEDS WORK
+- Reuse the same active implementation run as the verifier for final Gate 4 verdict
 - Modify files in archive/ or specs/ during implementation
 
 ## Commands

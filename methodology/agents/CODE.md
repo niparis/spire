@@ -29,3 +29,9 @@ For each task:
 After each task, update SESSION.md while preserving the template sections.
 
 At session end, update SESSION.md with full status and next action.
+
+Gate handoff:
+- The code agent does not produce the final Gate 4 verdict.
+- When implementation tasks are complete, hand off to the verification agent to
+  produce `changes/[feature]/VERIFICATION_REPORT.md`.
+- Do not open or request a PR from this mode when verification is pending.

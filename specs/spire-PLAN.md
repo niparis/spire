@@ -132,6 +132,22 @@ opencode-spire/
   - optional integrity hash
 - `spire update` uses persisted metadata to keep update behavior deterministic.
 
+### Agent Mode and Verification Gate (revision)
+- Plan mode is allowed to edit/write Markdown planning artifacts only.
+  - Default deny for edits and writes.
+  - Allowlist: `**/*.md` (and optionally `**/*.mdx`).
+  - This enables plan-mode output to `changes/[feature]/PLAN.md` and
+    `changes/[feature]/TASKS.md` without enabling code changes.
+- Build mode continues to own implementation changes.
+- Verification is elevated to a dedicated Gate 4 role:
+  - Add a verification agent profile and verification skill guidance.
+  - Required output: `changes/[feature]/VERIFICATION_REPORT.md` with
+    traceability matrix, commands run, coverage summary, self-review, and verdict.
+  - PR opening is blocked when verdict is `NEEDS WORK`.
+- Independence policy:
+  - Preferred: run Gate 4 verification in a separate OpenCode session from build.
+  - Minimum rule: verifier must not be the same active implementation run.
+
 ---
 
 ## Delivery / Installation
@@ -160,11 +176,16 @@ opencode-spire/
   internal/scaffold/*.go          CREATE
   internal/status/*.go            CREATE
   methodology/project_root/manifest.json  CREATE
+  methodology/agents/VERIFICATION.md      CREATE
+  methodology/skills/verification.md      UPDATE (gate-4 schema and verdict rules)
+  methodology/opencode.json               UPDATE (plan markdown-only permissions + verification agent)
+  methodology/templates/opencode.json     UPDATE (inherit same permission model)
   scripts/install.sh              CREATE
   methodology/                    CREATE (existing content copied)
   CHANGELOG.md                    CREATE
   README.md                       CREATE
   .github/workflows/ci.yaml       CREATE
+  .github/workflows/release.yaml  CREATE (single publish job after matrix build artifacts)
 ```
 
 ---
@@ -180,6 +201,7 @@ opencode-spire/
   - gitignore idempotency
   - template substitution
   - manifest parsing and mapping policy behavior
+  - verification report generator schema validation
 
 **Integration tests:**
 - Temp-dir workflow tests:
@@ -189,6 +211,7 @@ opencode-spire/
   - update reports project_root template changes without overwriting protected files
   - new creates expected files
   - status outputs expected states/table
+  - verification gate emits required `VERIFICATION_REPORT.md` sections
 
 **Manual smoke test checklist** (run before any release tag):
 - Fresh macOS Apple Silicon machine

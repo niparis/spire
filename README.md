@@ -6,6 +6,15 @@ It operationalizes two reliability layers from the product spec:
 - Spec Quality (gate spec clarity before planning/implementation)
 - Session Continuity (feature-scoped session state, no context drift)
 
+## Why The Name "Spire"
+
+We chose `Spire` because it feels intentional and architectural: a high point built
+on strong structure, which matches this tool's goal (precise specs -> reliable delivery).
+
+- Short and memorable for CLI use (`spire init`, `spire new`, `spire status`).
+- Signals quality and precision instead of a temporary codename.
+- Fits the product positioning: premium developer experience for agentic workflows.
+
 ## Install
 
 ```bash
@@ -27,7 +36,7 @@ Supported installer targets:
    spire new
    ```
 3. Run your audit/planning flow from the generated spec.
-4. Implement and verify.
+4. Implement in build mode, then run Gate 4 verification in a separate session.
 5. Check pipeline state at any time:
    ```bash
    spire status
@@ -62,6 +71,12 @@ Supported installer targets:
 - `Run spire init first.`: initialize the repository before `update`/feature flows.
 - Installer succeeded but `spire` not found: add install directory to your `PATH`.
 - `spire update` blocked by local edits: stash or revert local `.methodology/` changes first.
+
+## Verification Independence
+
+- Preferred: run Gate 4 verification in a separate OpenCode session from build mode.
+- Minimum: final Gate 4 verdict should not come from the same active implementation run.
+- Never open a PR when `VERIFICATION_REPORT.md` verdict is `NEEDS WORK`.
 
 ## Related Docs
 
