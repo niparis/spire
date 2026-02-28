@@ -79,8 +79,8 @@ opencode-spire/
 
 ### `spire init` (run once per project)
 - Fails if already initialised (`.methodology/` exists)
-- Fetches methodology content into `.methodology/`
-  (default: shallow git clone + sparse checkout of `methodology/`)
+- Fetches methodology content into `.methodology/` from the canonical GitHub source
+  with zero user configuration
 - Treats `.methodology/` as a recursive payload sync target (no hardcoded file list)
 - Adds `.methodology/` to `.gitignore` (no duplicate entry)
 - Applies `project_root/manifest.json` mappings from `.methodology/project_root/`
@@ -94,7 +94,7 @@ opencode-spire/
 - Detects local edits inside `.methodology/` and warns
 - In interactive mode: asks confirmation to continue
 - In non-interactive mode: aborts safely when dirty
-- Pulls latest methodology content
+- Refreshes methodology content from the same canonical GitHub source model as init
 - Prints changed methodology files
 - Re-evaluates `project_root/manifest.json` mappings after sync
 - Does not overwrite user-modified root files; prints notice when upstream template
@@ -117,6 +117,20 @@ opencode-spire/
   - Awaiting PR
   - Complete
 - Prints aligned table (`#`, `Feature`, `Status`)
+
+### Methodology Source Strategy (revision)
+- `SPIRE_METHODOLOGY_SOURCE` is removed as a required runtime input for users.
+- `spire init` and `spire update` resolve source automatically from the official
+  GitHub repository; users are not asked to provide local source paths.
+- Download mechanism: fetch repository tarball for a chosen ref, extract only
+  the `methodology/` subtree, and sync it into project `.methodology/`.
+- Avoid shelling out to `git` for runtime fetch to reduce host dependencies.
+- Persist source metadata in `.methodology/.spire-source.json`:
+  - repository
+  - ref/tag
+  - fetched_at timestamp
+  - optional integrity hash
+- `spire update` uses persisted metadata to keep update behavior deterministic.
 
 ---
 

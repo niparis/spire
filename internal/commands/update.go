@@ -28,12 +28,6 @@ func RunUpdate(args []string, projectRoot string, stdin io.Reader, interactive b
 		return 1
 	}
 
-	source, err := methodology.ResolveSource()
-	if err != nil {
-		fmt.Fprintf(stderr, "failed to resolve methodology source: %v\n", err)
-		return 1
-	}
-
 	dirtyFiles, err := methodology.DetectDirty(methodologyPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to inspect local methodology edits: %v\n", err)
@@ -57,7 +51,18 @@ func RunUpdate(args []string, projectRoot string, stdin io.Reader, interactive b
 		}
 	}
 
-	changedFiles, err := methodology.SyncAndReportChanges(methodologyPath, source)
+	metadata, err := methodology.ReadSourceMetadata(methodologyPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "failed to read methodology source metadata: %v\n", err)
+		return 1
+	}
+
+	source := methodology.DefaultSourceMetadata()
+	if metadata != nil {
+		source = *metadata
+	}
+
+	changedFiles, _, err := methodology.SyncAndReportChangesFromMetadata(methodologyPath, source)
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to update methodology payload: %v\n", err)
 		return 1
