@@ -139,6 +139,14 @@ func ApplyProjectRootUpdateMappings(projectRoot string, methodologyDir string, c
 		sourceRel = filepath.ToSlash(sourceRel)
 
 		if exists && action.Policy == PolicyNeverOverwrite {
+			if isManagedOpencodeDestination(action.Destination) && changedSet[sourceRel] {
+				if err := copyFile(action.Source, destination); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "updated: %s\n", action.Destination)
+				continue
+			}
+
 			if action.NotifyIfSourceChanged && changedSet[sourceRel] {
 				fmt.Fprintf(out, "notice: upstream %s changed; kept existing %s\n", sourceRel, action.Destination)
 			}
@@ -172,4 +180,9 @@ func pathExists(path string) (bool, error) {
 		return false, nil
 	}
 	return false, fmt.Errorf("stat %q: %w", path, err)
+}
+
+func isManagedOpencodeDestination(destination string) bool {
+	destination = filepath.ToSlash(destination)
+	return strings.HasPrefix(destination, ".opencode/")
 }

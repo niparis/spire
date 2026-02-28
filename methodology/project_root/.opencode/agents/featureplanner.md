@@ -1,6 +1,6 @@
 ---
 description: Plan mode for spec audit and implementation planning.
-mode: primary
+mode: subagent
 permission:
   edit:
     "*": deny

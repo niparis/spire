@@ -16,8 +16,8 @@
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/plan.md",
-      "destination": ".opencode/agents/plan.md",
+      "source": ".opencode/agents/featureplanner.md",
+      "destination": ".opencode/agents/featureplanner.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
