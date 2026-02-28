@@ -51,6 +51,8 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 			return 1
 		}
 		return commands.RunStatus(args[1:], cwd, stdout, stderr)
+	case "upgrade":
+		return commands.RunUpgrade(args[1:], Version, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n\n", args[0])
 		printHelp(stderr)
@@ -69,6 +71,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "  update    Update local methodology")
 	fmt.Fprintln(w, "  new       Create a new feature spec")
 	fmt.Fprintln(w, "  status    Show feature status table")
+	fmt.Fprintln(w, "  upgrade   Upgrade spire executable")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -h, --help       Show help")

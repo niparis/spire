@@ -118,6 +118,12 @@ opencode-spire/
   - Complete
 - Prints aligned table (`#`, `Feature`, `Status`)
 
+### `spire upgrade`
+- Checks latest GitHub release for `niparis/spire`
+- Compares current CLI semantic version with latest tag
+- If latest is newer, downloads matching OS/arch asset and replaces current executable
+- If already latest (or newer), prints up-to-date message and exits without changes
+
 ### Methodology Source Strategy (revision)
 - `SPIRE_METHODOLOGY_SOURCE` is removed as a required runtime input for users.
 - `spire init` and `spire update` resolve source automatically from the official

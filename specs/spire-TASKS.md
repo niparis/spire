@@ -199,6 +199,26 @@ Format per task: Goal / Files / Tests to add / Verification step.
 - `spire --version` outputs `spire 0.1.0`
 - `spire init` and `spire new` function in a temp project
 
+### Task 018 — Implement `spire upgrade`
+**Goal:** Self-update the installed `spire` executable from GitHub Releases when a newer version exists.
+**Files:**
+- `internal/cli/root.go`
+- `internal/commands/upgrade.go`
+- `internal/commands/upgrade_test.go`
+- `README.md`
+**Behavior notes:**
+- Fetch latest release metadata from `niparis/spire`.
+- Compare current CLI version with latest semantic tag.
+- Only replace executable when latest release is newer.
+- Resolve asset by current OS/arch and fail with actionable error when unavailable.
+**Tests:**
+- Up-to-date path does not replace binary.
+- Newer-release path replaces binary.
+- Missing asset fails with clear error.
+- `dev` version path upgrades to latest release.
+**Verification:**
+- Running `spire upgrade` on an older binary updates it and then `spire --version` matches latest tag.
+
 ---
 
 ## Phase 6 — Agent Gating and Verification
@@ -292,8 +312,9 @@ Format per task: Goal / Files / Tests to add / Verification step.
 | 015 | verification agent profile | Agent gating | 10 min |
 | 016 | verification schema + PR gate rule | Agent gating | 15 min |
 | 017 | verification independence policy | Agent gating | 10 min |
+| 018 | spire self-upgrade command | Core CLI | 20 min |
 
-Total: ~3.5-4.0 hours of implementation time.
+Total: ~4.0-4.5 hours of implementation time.
 
 ---
 
@@ -314,3 +335,4 @@ Total: ~3.5-4.0 hours of implementation time.
 | AC-11 | Plan mode can write markdown planning artifacts only | methodology/project_root/opencode.json | config validation + manual |
 | AC-12 | Gate 4 is executed by dedicated verification role | methodology/agents/VERIFICATION.md | process validation |
 | AC-13 | PR is blocked when verification verdict is NEEDS WORK | methodology/skills/verification.md | documentation + workflow checks |
+| AC-14 | `spire upgrade` replaces executable only when a newer release exists | internal/commands/upgrade.go | upgrade tests |
