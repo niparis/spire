@@ -1,8 +1,0 @@
-{
-  "instructions": [
-    ".methodology/agents/ARCHITECTURE.md",
-    ".methodology/agents/SPIRE.md",
-    "AGENTS.md",
-    "specs/PRODUCT.md"
-  ]
-}
