@@ -86,12 +86,45 @@ Supported installer targets:
    - Include references to spec, plan, and verification report.
    - Merge after CI + human review, then archive completed change artifacts.
 
+## Workflow Diagram
+
+```mermaid
+flowchart TD
+    A[Stakeholder Intent] --> B[Bootstrap Repo<br/>spire init]
+    B --> C[Create Feature Scaffold<br/>spire new]
+    C --> D[Gate 0: Spec Authoring<br/>specs/feature-*.md]
+
+    D --> E[Gate 1: Spec Audit<br/>Plan Agent + Spec Auditor]
+    E -->|FAIL or CONDITIONAL| F[Human Resolves Spec Issues]
+    F --> D
+    E -->|PASS >= 40/50| G[Gate 2: Planning<br/>Produce PLAN.md + TASKS.md]
+
+    G --> H{Human Approval?}
+    H -->|No| G
+    H -->|Yes| I[Gate 3: Implementation Loop<br/>Build Agent + TDD + SESSION.md]
+
+    I --> J{All Tasks Complete?}
+    J -->|No| I
+    J -->|Yes| K[Gate 4: Verification<br/>Verification Agent Session]
+
+    K --> L[Produce VERIFICATION_REPORT.md]
+    L --> M{Verdict}
+    M -->|NEEDS WORK| I
+    M -->|READY FOR PR| N[Gate 5: PR & Merge]
+
+    N --> O[CI + Human Review]
+    O --> P{Approved?}
+    P -->|No| I
+    P -->|Yes| Q[Merge + Archive changes/feature]
+```
+
 ## Command Reference
 
 | Command | Behavior |
 |---|---|
 | `spire init` | Downloads methodology from the canonical Spire GitHub source, syncs it into `.methodology/`, applies root projections via manifest (for example, `AGENTS.md`), and avoids overwriting existing root files |
 | `spire update` | Detects local edits in `.methodology/`, prompts in interactive mode, safely aborts in non-interactive mode, refreshes payload using `.methodology/.spire-source.json` (with canonical fallback), and reports protected-file notices |
+| `spire upgrade` | Checks GitHub Releases for a newer `spire` version and replaces the current executable only when a newer release is available |
 | `spire new` | Creates the next numbered feature spec (`max+1`) and `changes/<feature>/SESSION.md` from templates |
 | `spire status` | Scans feature artifacts and prints inferred lifecycle state (`Spec only` -> `Awaiting PR` -> `Complete`) |
 
@@ -99,6 +132,7 @@ Supported installer targets:
 
 - `.methodology/` is the synced methodology payload managed by `spire`.
 - `.methodology/project_root/manifest.json` controls which files are projected to repository root.
+- `opencode.json` holds shared OpenCode instructions; agent definitions live under `.opencode/agents/*.json`.
 - `.methodology/.spire-source.json` stores where methodology was fetched from for deterministic updates.
 - Canonical session continuity file is always `changes/[feature]/SESSION.md`.
 
