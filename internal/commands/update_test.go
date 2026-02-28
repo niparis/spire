@@ -162,6 +162,47 @@ func TestRunUpdateRootMappingNoticeWithoutOverwrite(t *testing.T) {
 	}
 }
 
+func TestRunUpdateOpencodeMappingOverwritesWhenSourceChanged(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	localPath := filepath.Join(projectRoot, ".opencode", "agents", "productengineer.md")
+	if err := os.WriteFile(localPath, []byte("local custom\n"), 0o644); err != nil {
+		t.Fatalf("write local productengineer.md: %v", err)
+	}
+
+	upstreamPath := filepath.Join(source, "project_root", ".opencode", "agents", "productengineer.md")
+	upstreamContent := "---\nmode: primary\n---\nupstream changed\n"
+	if err := os.WriteFile(upstreamPath, []byte(upstreamContent), 0o644); err != nil {
+		t.Fatalf("write upstream productengineer.md: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "updated: .opencode/agents/productengineer.md") {
+		t.Fatalf("missing update notice: %q", stdout.String())
+	}
+
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read local productengineer.md: %v", err)
+	}
+	if string(data) != upstreamContent {
+		t.Fatalf("productengineer.md was not updated; got %q", string(data))
+	}
+}
+
 func TestRunUpdateUsesStoredMetadataOverCurrentDefaults(t *testing.T) {
 	projectRoot := t.TempDir()
 	source := createMethodologySource(t)
