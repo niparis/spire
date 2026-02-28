@@ -49,6 +49,44 @@
         }
       }
     },
+    "docs-writer": {
+      "description": "Expert technical writer and documentation specialist. Creates, updates, and improves Markdown/MDX documentation with clear narrative flow.",
+      "instructions": [
+        ".methodology/agents/DOCS_WRITER.md",
+        "AGENTS.md"
+      ],
+      "permissions": {
+        "edit": {
+          "*": "deny",
+          "**/*.md": "allow",
+          "**/*.mdx": "allow"
+        },
+        "write": {
+          "*": "deny",
+          "**/*.md": "allow",
+          "**/*.mdx": "allow"
+        },
+        "bash": "deny",
+        "webfetch": "allow"
+      }
+    },
+    "investigator": {
+      "description": "Virtual hunting dog researcher that tracks down information across the web",
+      "instructions": [
+        ".methodology/agents/INVESTIGATOR.md",
+        "AGENTS.md"
+      ],
+      "model": "openai/gpt-5.2",
+      "temperature": 0.4,
+      "thinking": {
+        "type": "enabled"
+      },
+      "permissions": {
+        "edit": "ask",
+        "write": "ask",
+        "bash": "ask"
+      }
+    },
     "ProductEngineer": {
       "instructions": [
         ".methodology/agents/ARCHITECTURE.md",

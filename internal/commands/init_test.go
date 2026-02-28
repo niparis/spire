@@ -30,6 +30,7 @@ func TestRunInitHappyPathCreatesMethodologyAndRootProjection(t *testing.T) {
 
 	assertFileContains(t, filepath.Join(projectRoot, ".methodology", "skills", "spec-auditor.md"), "Spec")
 	assertFileContains(t, filepath.Join(projectRoot, "AGENTS.md"), "Project")
+	assertFileContains(t, filepath.Join(projectRoot, "opencode.json"), "\"agents\"")
 	assertFileContains(t, filepath.Join(projectRoot, ".gitignore"), ".methodology/")
 	assertFileContains(t, filepath.Join(projectRoot, ".methodology", ".spire-source.json"), "\"repository\": \"niparis/spire\"")
 }
@@ -56,14 +57,19 @@ func TestRunInitAlreadyInitializedAborts(t *testing.T) {
 	}
 }
 
-func TestRunInitDoesNotOverwriteExistingAgentsFile(t *testing.T) {
+func TestRunInitDoesNotOverwriteExistingProjectedFiles(t *testing.T) {
 	source := createMethodologySource(t)
 	configureCanonicalSourceFromDir(t, source)
 	projectRoot := t.TempDir()
 
-	existing := "# existing\nkeep me\n"
-	if err := os.WriteFile(filepath.Join(projectRoot, "AGENTS.md"), []byte(existing), 0o644); err != nil {
+	existingAgents := "# existing\nkeep me\n"
+	if err := os.WriteFile(filepath.Join(projectRoot, "AGENTS.md"), []byte(existingAgents), 0o644); err != nil {
 		t.Fatalf("write existing AGENTS.md: %v", err)
+	}
+
+	existingOpenCode := "{\n  \"agents\": {\n    \"default\": {}\n  }\n}\n"
+	if err := os.WriteFile(filepath.Join(projectRoot, "opencode.json"), []byte(existingOpenCode), 0o644); err != nil {
+		t.Fatalf("write existing opencode.json: %v", err)
 	}
 
 	var stdout bytes.Buffer
@@ -74,13 +80,22 @@ func TestRunInitDoesNotOverwriteExistingAgentsFile(t *testing.T) {
 		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
 	}
 
-	data, err := os.ReadFile(filepath.Join(projectRoot, "AGENTS.md"))
+	agentsData, err := os.ReadFile(filepath.Join(projectRoot, "AGENTS.md"))
 	if err != nil {
 		t.Fatalf("read AGENTS.md: %v", err)
 	}
 
-	if string(data) != existing {
-		t.Fatalf("AGENTS.md was overwritten: got %q", string(data))
+	if string(agentsData) != existingAgents {
+		t.Fatalf("AGENTS.md was overwritten: got %q", string(agentsData))
+	}
+
+	opencodeData, err := os.ReadFile(filepath.Join(projectRoot, "opencode.json"))
+	if err != nil {
+		t.Fatalf("read opencode.json: %v", err)
+	}
+
+	if string(opencodeData) != existingOpenCode {
+		t.Fatalf("opencode.json was overwritten: got %q", string(opencodeData))
 	}
 }
 
@@ -137,12 +152,20 @@ func createMethodologySource(t *testing.T) string {
 
 	writeFile(t, filepath.Join(root, "skills", "spec-auditor.md"), "# Spec\n")
 	writeFile(t, filepath.Join(root, "project_root", "local_agents.md"), "# Project\n")
+	writeFile(t, filepath.Join(root, "project_root", "opencode.json"), "{\n  \"agents\": {}\n}\n")
 	writeFile(t, filepath.Join(root, "project_root", "manifest.json"), `{
   "version": 1,
   "mappings": [
     {
       "source": "local_agents.md",
       "destination": "AGENTS.md",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": "opencode.json",
+      "destination": "opencode.json",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true

@@ -42,6 +42,50 @@ Supported installer targets:
    spire status
    ```
 
+## Developer Workflow
+
+1. Initialize once per repository with `spire init`.
+2. Optionally run product/architecture planning if those foundations are missing.
+3. Run `spire new` and complete the generated feature spec.
+4. Use the Plan agent for spec audit + planning, then approve `PLAN.md` and `TASKS.md`.
+5. Use the Build agent to implement task-by-task with TDD and keep `changes/<feature>/SESSION.md` updated.
+6. Use the Verification agent in a separate session to produce `VERIFICATION_REPORT.md`.
+7. Open a PR only when verification verdict is `READY FOR PR`, then merge after CI + human review.
+
+## Full Gate Flow
+
+1. **Bootstrap**
+   - Run `spire init` once in the repository to install methodology scaffolding.
+   - Use `spire update` whenever you want the latest methodology payload.
+
+2. **Gate 0 - Spec Authoring**
+   - Run `spire new` to create a feature spec and session log scaffold.
+   - Complete the feature spec fully (goal, journeys, acceptance criteria, NFRs, out-of-scope, open questions).
+
+3. **Gate 1 - Spec Audit**
+   - Run the Plan agent to audit the spec before planning.
+   - If verdict is `FAIL` or `CONDITIONAL`, resolve issues and re-audit.
+   - Only proceed when verdict is `PASS`.
+
+4. **Gate 2 - Planning**
+   - Plan mode produces `changes/<feature>/PLAN.md` and `changes/<feature>/TASKS.md`.
+   - Human reviews and explicitly approves plan/tasks before implementation starts.
+
+5. **Gate 3 - Implementation Loop**
+   - Build mode executes `TASKS.md` in small, test-first steps.
+   - For each task: write failing test, implement, run lint/typecheck/tests, then commit.
+   - Keep `changes/<feature>/SESSION.md` updated after each task and at session end.
+
+6. **Gate 4 - Verification**
+   - Run verification in a separate OpenCode session from implementation.
+   - Produce `changes/<feature>/VERIFICATION_REPORT.md` with traceability, command evidence, and verdict.
+   - If verdict is `NEEDS WORK`, return to Gate 3.
+
+7. **Gate 5 - PR and Merge**
+   - Open PR only when Gate 4 verdict is `READY FOR PR`.
+   - Include references to spec, plan, and verification report.
+   - Merge after CI + human review, then archive completed change artifacts.
+
 ## Command Reference
 
 | Command | Behavior |

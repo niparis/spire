@@ -206,8 +206,7 @@ Format per task: Goal / Files / Tests to add / Verification step.
 ### Task 014 — Plan mode Markdown-only write permissions
 **Goal:** Allow planning agents to write planning artifacts while preventing non-markdown edits.
 **Files:**
-- `methodology/opencode.json`
-- `methodology/templates/opencode.json`
+- `methodology/project_root/opencode.json`
 **Changes:**
 - Configure `agent.plan.edit` with deny-by-default and allow `**/*.md` (optionally `**/*.mdx`).
 - Configure `agent.plan.write` with deny-by-default and allow `**/*.md` (optionally `**/*.mdx`).
@@ -223,8 +222,7 @@ Format per task: Goal / Files / Tests to add / Verification step.
 **Goal:** Separate implementation from verification with a first-class verifier role.
 **Files:**
 - `methodology/agents/VERIFICATION.md` (new)
-- `methodology/opencode.json`
-- `methodology/templates/opencode.json`
+- `methodology/project_root/opencode.json`
 **Changes:**
 - Add a `verification` agent profile wired to verification instructions.
 - Ensure verifier role is configured for report production, not feature implementation.
@@ -313,6 +311,6 @@ Total: ~3.5-4.0 hours of implementation time.
 | AC-8 | spire status shows correct state | internal/status/infer.go | status tests |
 | AC-9 | Works on macOS and Linux | build + runtime | CI matrix |
 | AC-10 | No runtime dependency beyond binary (no required git/env var for init/update) | command layer | integration + docs |
-| AC-11 | Plan mode can write markdown planning artifacts only | methodology/opencode.json | config validation + manual |
+| AC-11 | Plan mode can write markdown planning artifacts only | methodology/project_root/opencode.json | config validation + manual |
 | AC-12 | Gate 4 is executed by dedicated verification role | methodology/agents/VERIFICATION.md | process validation |
 | AC-13 | PR is blocked when verification verdict is NEEDS WORK | methodology/skills/verification.md | documentation + workflow checks |
