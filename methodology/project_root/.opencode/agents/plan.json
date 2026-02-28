@@ -1,0 +1,20 @@
+{
+  "instructions": [
+    ".methodology/agents/FEATURE_PLANNER.md",
+    ".methodology/agents/SPIRE.md",
+    ".methodology/skills/spec-auditor/SKILL.md",
+    "AGENTS.md"
+  ],
+  "permissions": {
+    "edit": {
+      "*": "deny",
+      "**/*.md": "allow",
+      "**/*.mdx": "allow"
+    },
+    "write": {
+      "*": "deny",
+      "**/*.md": "allow",
+      "**/*.mdx": "allow"
+    }
+  }
+}

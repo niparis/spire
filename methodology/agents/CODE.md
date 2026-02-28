@@ -14,7 +14,7 @@ Feature Resolution:
 2. Read changes/[feature]/SESSION.md (if exists) — this is your current state.
 3. Read changes/[feature]/TASKS.md — this is your work queue.
 4. Read specs/[feature].md — this is your truth.
-5. Read agents/AGENTS.md — these are your operating rules.
+5. Read agents/SPIRE.md — these are your operating rules.
 
 If changes/[feature]/SESSION.md does not exist, create it using
 .methodology/templates/session-template.md before starting tasks.

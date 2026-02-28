@@ -11,7 +11,7 @@ Feature Resolution:
 The spec audit has passed for specs/[feature].md.
 
 1. Read .methodology/templates/spec-template.md — this is the required spec schema contract.
-2. Read specs/[feature].md, specs/product.md, agents/AGENTS.md,
+2. Read specs/[feature].md, specs/PRODUCT.md, agents/SPIRE.md,
    and any relevant architecture/adr-*.md files.
 
 If specs/[feature].md deviates from the required template structure, stop and

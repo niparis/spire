@@ -30,7 +30,10 @@ func TestRunInitHappyPathCreatesMethodologyAndRootProjection(t *testing.T) {
 
 	assertFileContains(t, filepath.Join(projectRoot, ".methodology", "skills", "spec-auditor.md"), "Spec")
 	assertFileContains(t, filepath.Join(projectRoot, "AGENTS.md"), "Project")
-	assertFileContains(t, filepath.Join(projectRoot, "opencode.json"), "\"agents\"")
+	assertFileContains(t, filepath.Join(projectRoot, "opencode.json"), "\"instructions\"")
+	assertFileNotContains(t, filepath.Join(projectRoot, "opencode.json"), "\"agents\"")
+	assertFileContains(t, filepath.Join(projectRoot, ".opencode", "agents", "plan.json"), "FEATURE_PLANNER.md")
+	assertFileContains(t, filepath.Join(projectRoot, ".opencode", "agents", "verifier.json"), "\"mode\": \"subagent\"")
 	assertFileContains(t, filepath.Join(projectRoot, ".gitignore"), ".methodology/")
 	assertFileContains(t, filepath.Join(projectRoot, ".methodology", ".spire-source.json"), "\"repository\": \"niparis/spire\"")
 }
@@ -67,9 +70,17 @@ func TestRunInitDoesNotOverwriteExistingProjectedFiles(t *testing.T) {
 		t.Fatalf("write existing AGENTS.md: %v", err)
 	}
 
-	existingOpenCode := "{\n  \"agents\": {\n    \"default\": {}\n  }\n}\n"
+	existingOpenCode := "{\n  \"instructions\": [\n    \"AGENTS.md\"\n  ]\n}\n"
 	if err := os.WriteFile(filepath.Join(projectRoot, "opencode.json"), []byte(existingOpenCode), 0o644); err != nil {
 		t.Fatalf("write existing opencode.json: %v", err)
+	}
+
+	existingPlanAgent := "{\n  \"instructions\": [\n    \"AGENTS.md\"\n  ]\n}\n"
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".opencode", "agents"), 0o755); err != nil {
+		t.Fatalf("mkdir .opencode/agents: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, ".opencode", "agents", "plan.json"), []byte(existingPlanAgent), 0o644); err != nil {
+		t.Fatalf("write existing plan agent: %v", err)
 	}
 
 	var stdout bytes.Buffer
@@ -96,6 +107,15 @@ func TestRunInitDoesNotOverwriteExistingProjectedFiles(t *testing.T) {
 
 	if string(opencodeData) != existingOpenCode {
 		t.Fatalf("opencode.json was overwritten: got %q", string(opencodeData))
+	}
+
+	planData, err := os.ReadFile(filepath.Join(projectRoot, ".opencode", "agents", "plan.json"))
+	if err != nil {
+		t.Fatalf("read .opencode/agents/plan.json: %v", err)
+	}
+
+	if string(planData) != existingPlanAgent {
+		t.Fatalf(".opencode/agents/plan.json was overwritten: got %q", string(planData))
 	}
 }
 
@@ -151,8 +171,15 @@ func createMethodologySource(t *testing.T) string {
 	root := t.TempDir()
 
 	writeFile(t, filepath.Join(root, "skills", "spec-auditor.md"), "# Spec\n")
+	writeFile(t, filepath.Join(root, "agents", "SPIRE.md"), "# SPIRE\n")
 	writeFile(t, filepath.Join(root, "project_root", "local_agents.md"), "# Project\n")
-	writeFile(t, filepath.Join(root, "project_root", "opencode.json"), "{\n  \"agents\": {}\n}\n")
+	writeFile(t, filepath.Join(root, "project_root", "opencode.json"), "{\n  \"instructions\": [\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
+	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "plan.json"), "{\n  \"instructions\": [\n    \".methodology/agents/FEATURE_PLANNER.md\",\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
+	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "default.json"), "{\n  \"instructions\": [\n    \".methodology/agents/CODE.md\",\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
+	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "verifier.json"), "{\n  \"mode\": \"subagent\",\n  \"instructions\": [\n    \".methodology/agents/VERIFICATION.md\",\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
+	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "docs-writer.json"), "{\n  \"instructions\": [\n    \".methodology/agents/DOCS_WRITER.md\",\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
+	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "investigator.json"), "{\n  \"instructions\": [\n    \".methodology/agents/INVESTIGATOR.md\",\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
+	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "productengineer.json"), "{\n  \"instructions\": [\n    \".methodology/agents/ARCHITECTURE.md\",\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\",\n    \"specs/PRODUCT.md\"\n  ]\n}\n")
 	writeFile(t, filepath.Join(root, "project_root", "manifest.json"), `{
   "version": 1,
   "mappings": [
@@ -166,6 +193,48 @@ func createMethodologySource(t *testing.T) string {
     {
       "source": "opencode.json",
       "destination": "opencode.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/plan.json",
+      "destination": ".opencode/agents/plan.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/default.json",
+      "destination": ".opencode/agents/default.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/verifier.json",
+      "destination": ".opencode/agents/verifier.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/docs-writer.json",
+      "destination": ".opencode/agents/docs-writer.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/investigator.json",
+      "destination": ".opencode/agents/investigator.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/productengineer.json",
+      "destination": ".opencode/agents/productengineer.json",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
@@ -275,5 +344,16 @@ func assertFileContains(t *testing.T, path string, want string) {
 	}
 	if !strings.Contains(string(data), want) {
 		t.Fatalf("file %s does not contain %q; got %q", path, want, string(data))
+	}
+}
+
+func assertFileNotContains(t *testing.T, path string, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if strings.Contains(string(data), want) {
+		t.Fatalf("file %s unexpectedly contains %q; got %q", path, want, string(data))
 	}
 }

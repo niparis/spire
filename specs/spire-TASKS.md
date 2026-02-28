@@ -259,7 +259,7 @@ Format per task: Goal / Files / Tests to add / Verification step.
 - `methodology/skills/verification.md`
 - `methodology/agents/CODE.md`
 - `methodology/agents/FEATURE_PLANNER.md`
-- `methodology/agents/AGENTS.md`
+- `methodology/agents/SPIRE.md`
 **Changes:**
 - Define mandatory `VERIFICATION_REPORT.md` sections:
   - Traceability Matrix
@@ -280,7 +280,7 @@ Format per task: Goal / Files / Tests to add / Verification step.
 **Goal:** Reduce self-review bias by running Gate 4 in an independent context.
 **Files:**
 - `methodology/agents/VERIFICATION.md`
-- `methodology/agents/AGENTS.md`
+- `methodology/agents/SPIRE.md`
 - `README.md`
 **Changes:**
 - Document preferred operating rule: run verification in a separate OpenCode session.

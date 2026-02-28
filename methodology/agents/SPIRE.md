@@ -1,4 +1,4 @@
-# AGENTS.md — Global Agent Governance
+# SPIRE.md — Global Agent Governance
 
 ## Session Continuity Rules
 
@@ -66,8 +66,7 @@ See SC-1 through SC-4 in Session Continuity Rules section above.
 
 ## Skills
 Load conditionally via opencode.json instructions array:
-- agents/skills/spec-auditor/SKILL.md  (always loaded in plan agent)
-- agents/skills/backend.md       (load for backend tasks)
-- agents/skills/frontend.md      (load for frontend tasks)
-- agents/skills/testing.md       (always loaded)
-- agents/skills/security.md      (load for auth/data tasks)
+- skills/spec-auditor/SKILL.md      (always loaded in plan agent)
+- skills/product-definition.md      (load for product work)
+- skills/architecture-definition.md (load for architecture work)
+- skills/verification.md            (load for verification work)
