@@ -21,8 +21,8 @@ jobs:
       - name: Run tests
         run: go test ./...
 
-  build-and-release:
-    name: build and upload assets
+  build-assets:
+    name: build (${{ matrix.asset_name }})
     needs: test
     runs-on: ubuntu-latest
     strategy:
@@ -56,7 +56,29 @@ jobs:
       - name: Rename asset
         run: mv "dist/${{ matrix.binary_name }}" "dist/${{ matrix.asset_name }}"
 
-      - name: Upload release asset
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  publish-release:
+    name: publish release assets
+    needs: build-assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: asset-*
+          merge-multiple: true
+          path: dist
+
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/${{ matrix.asset_name }}
+          files: |
+            dist/spire_darwin_arm64
+            dist/spire_windows_amd64.exe
+          fail_on_unmatched_files: true
