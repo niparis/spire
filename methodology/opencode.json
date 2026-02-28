@@ -1,0 +1,24 @@
+{
+  "instructions": [
+    ".methodology/templates/AGENTS.md",
+    "agents/AGENTS.md",
+    "specs/product.md"
+  ],
+  "agents": {
+    "plan": {
+      "instructions": [
+        ".methodology/agents/plan-agent.md",
+        ".methodology/skills/spec-auditor.md",
+        "agents/AGENTS.md"
+      ]
+    },
+    "default": {
+      "instructions": [
+        ".methodology/agents/code-agent.md",
+        ".methodology/skills/testing.md",
+        ".methodology/skills/verification.md",
+        "agents/AGENTS.md"
+      ]
+    }
+  }
+}
