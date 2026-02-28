@@ -23,13 +23,6 @@
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/default.md",
-      "destination": ".opencode/agents/default.md",
-      "on_init": "if_missing",
-      "on_update": "never_overwrite",
-      "notify_if_source_changed": true
-    },
-    {
       "source": ".opencode/agents/verifier.md",
       "destination": ".opencode/agents/verifier.md",
       "on_init": "if_missing",
