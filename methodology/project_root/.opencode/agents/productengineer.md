@@ -1,5 +1,5 @@
 ---
-description: Product engineering and architecture planning agent.
+description: Product Engineering and architecture planning agent.
 mode: primary
 permission:
   edit:

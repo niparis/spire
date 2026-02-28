@@ -2,11 +2,11 @@
 
 This is a multi agent implementation of SDD (Specs Driven Development)
 
-1. An architecture agent (ProductEngineer) produces 
+1. An architecture agent (Productengineer) produces 
 - specs/PRODUCT.md : contains the product vision, user personas and key user stories. it's our product north star. It will contain a list of features with expected outcomes.
 - specs/ARCHITECTURE.md : contains the technology architecture of the project
 
-If those files do not exist you MUST ask the human to select the ProductEngineer agent to create them
+If those files do not exist you MUST ask the human to select the Productengineer agent to create them
 
 2. Then a Feature Planner agent will first detail and then audit the plan for a feature.
 The human will select the feature either directly, or you will propose it form the list we have in specs/PRODUCT.md. That feature has a shorthand, we will refer to it as [feature] in this document. We have the following files:
