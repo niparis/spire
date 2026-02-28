@@ -178,8 +178,7 @@ opencode-spire/
   methodology/project_root/manifest.json  CREATE
   methodology/agents/VERIFICATION.md      CREATE
   methodology/skills/verification.md      UPDATE (gate-4 schema and verdict rules)
-  methodology/opencode.json               UPDATE (plan markdown-only permissions + verification agent)
-  methodology/templates/opencode.json     UPDATE (inherit same permission model)
+  methodology/project_root/opencode.json  UPDATE (project-root opencode projection)
   scripts/install.sh              CREATE
   methodology/                    CREATE (existing content copied)
   CHANGELOG.md                    CREATE

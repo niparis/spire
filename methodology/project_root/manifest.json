@@ -7,6 +7,13 @@
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
+    },
+    {
+      "source": "opencode.json",
+      "destination": "opencode.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
     }
   ]
 }
