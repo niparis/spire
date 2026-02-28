@@ -70,3 +70,13 @@ Load conditionally via opencode.json instructions array:
 - skills/product-definition.md      (load for product work)
 - skills/architecture-definition.md (load for architecture work)
 - skills/verification.md            (load for verification work)
+
+## Subagents (When to Invoke)
+
+- `verifier` (MUST): before PR or merge decision; output `changes/[feature]/VERIFICATION_REPORT.md`; if verdict is NEEDS WORK, stop.
+- `reviewer` (MUST): after major module completion or SC-3 failure; output `changes/[feature]/REVIEW_REPORT.md`; unresolved HIGH issues block progress.
+- `docs-writer` (SHOULD): when API/behavior/docs-facing changes occur; output doc updates + note in `SESSION.md`.
+- `investigator` (SHOULD): when blocked by unknowns or external tradeoffs; output recommendation + sources in `SESSION.md`.
+
+Dispatch rule: pick the first matching MUST; if none, pick highest-value SHOULD.
+Log every delegation in `changes/[feature]/SESSION.md` (agent, reason, inputs, output, verdict).
