@@ -7,7 +7,7 @@
 Installer script (release flow):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOU/opencode-spire/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/niparis/spire/main/scripts/install.sh | bash
 ```
 
 Build locally:

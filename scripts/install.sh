@@ -2,7 +2,7 @@
 set -euo pipefail
 
 BINARY_NAME="spire"
-REPO="${SPIRE_REPO:-opencode-spire/opencode-spire}"
+REPO="${SPIRE_REPO:-niparis/spire}"
 VERSION="${SPIRE_VERSION:-latest}"
 INSTALL_DIR="${SPIRE_INSTALL_DIR:-}"
 DRY_RUN="${SPIRE_DRY_RUN:-0}"
