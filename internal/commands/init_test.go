@@ -175,7 +175,6 @@ func createMethodologySource(t *testing.T) string {
 	writeFile(t, filepath.Join(root, "project_root", "local_agents.md"), "# Project\n")
 	writeFile(t, filepath.Join(root, "project_root", "opencode.json"), "{\n  \"instructions\": [\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
 	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "plan.md"), "---\nmode: primary\n---\nRead .methodology/agents/FEATURE_PLANNER.md and .methodology/agents/SPIRE.md\n")
-	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "default.md"), "---\nmode: primary\n---\nRead .methodology/agents/CODE.md and .methodology/agents/SPIRE.md\n")
 	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "verifier.md"), "---\nmode: subagent\n---\nRead .methodology/agents/VERIFICATION.md and .methodology/agents/SPIRE.md\n")
 	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "docs-writer.md"), "---\nmode: subagent\n---\nRead .methodology/agents/DOCS_WRITER.md and .methodology/agents/SPIRE.md\n")
 	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "investigator.md"), "---\nmode: subagent\n---\nRead .methodology/agents/INVESTIGATOR.md and .methodology/agents/SPIRE.md\n")
@@ -200,13 +199,6 @@ func createMethodologySource(t *testing.T) string {
     {
       "source": ".opencode/agents/plan.md",
       "destination": ".opencode/agents/plan.md",
-      "on_init": "if_missing",
-      "on_update": "never_overwrite",
-      "notify_if_source_changed": true
-    },
-    {
-      "source": ".opencode/agents/default.md",
-      "destination": ".opencode/agents/default.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true

@@ -11,6 +11,5 @@ permission:
 ---
 Read these files before verification:
 - `.methodology/agents/VERIFICATION.md`
-- `.methodology/agents/SPIRE.md`
 - `.methodology/skills/verification.md`
 - `AGENTS.md`
