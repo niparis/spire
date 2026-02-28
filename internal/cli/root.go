@@ -8,7 +8,7 @@ import (
 	"opencode-spire/internal/commands"
 )
 
-const version = "0.1.0"
+var Version = "dev"
 
 func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -21,7 +21,7 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 		printHelp(stdout)
 		return 0
 	case "--version", "-v":
-		fmt.Fprintf(stdout, "spire %s\n", version)
+		fmt.Fprintf(stdout, "spire %s\n", Version)
 		return 0
 	case "init":
 		cwd, err := os.Getwd()

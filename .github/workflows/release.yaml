@@ -49,9 +49,11 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
+          RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags "-s -w" -o "dist/${{ matrix.binary_name }}" ./cmd/spire
+          VERSION="${RELEASE_VERSION#v}"
+          go build -trimpath -ldflags "-s -w -X 'opencode-spire/internal/cli.Version=${VERSION}'" -o "dist/${{ matrix.binary_name }}" ./cmd/spire
 
       - name: Rename asset
         run: mv "dist/${{ matrix.binary_name }}" "dist/${{ matrix.asset_name }}"
