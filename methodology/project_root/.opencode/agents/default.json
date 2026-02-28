@@ -1,0 +1,8 @@
+{
+  "instructions": [
+    ".methodology/agents/CODE.md",
+    ".methodology/agents/SPIRE.md",
+    ".methodology/skills/verification.md",
+    "AGENTS.md"
+  ]
+}

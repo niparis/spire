@@ -1,0 +1,19 @@
+{
+  "mode": "subagent",
+  "instructions": [
+    ".methodology/agents/VERIFICATION.md",
+    ".methodology/agents/SPIRE.md",
+    ".methodology/skills/verification.md",
+    "AGENTS.md"
+  ],
+  "permissions": {
+    "edit": {
+      "*": "deny",
+      "changes/**/*.md": "allow"
+    },
+    "write": {
+      "*": "deny",
+      "changes/**/*.md": "allow"
+    }
+  }
+}

@@ -15,7 +15,7 @@ Inputs:
 2. changes/[feature]/PLAN.md
 3. changes/[feature]/TASKS.md
 4. changes/[feature]/SESSION.md
-5. agents/AGENTS.md
+5. agents/SPIRE.md
 
 Output:
 - changes/[feature]/VERIFICATION_REPORT.md

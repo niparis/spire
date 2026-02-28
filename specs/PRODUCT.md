@@ -209,7 +209,7 @@ Feature Resolution:
 
 The spec audit has passed for specs/[feature].md.
 
-1. Read specs/[feature].md, specs/product.md, agents/AGENTS.md,
+1. Read specs/[feature].md, specs/PRODUCT.md, agents/SPIRE.md,
    and any relevant architecture/adr-*.md files.
 
 2. List any remaining technical ambiguities (not already in the spec's
@@ -322,7 +322,7 @@ Feature Resolution:
 1. Read changes/[feature]/SESSION.md (if exists) — this is your current state.
 2. Read changes/[feature]/TASKS.md — this is your work queue.
 3. Read specs/[feature].md — this is your truth.
-4. Read agents/AGENTS.md — these are your operating rules.
+4. Read agents/SPIRE.md — these are your operating rules.
 
 For each task:
   a. Write the failing test first (derived from the acceptance criterion it satisfies).
@@ -483,15 +483,15 @@ Load conditionally via opencode.json instructions array:
 ```json
 {
   "instructions": [
-    "agents/AGENTS.md",
-    "specs/product.md"
+    "agents/SPIRE.md",
+    "specs/PRODUCT.md"
   ],
   "agents": {
     "plan": {
       "instructions": [
-        "agents/AGENTS.md",
+        "agents/SPIRE.md",
         "agents/skills/spec-auditor.md",
-        "specs/product.md"
+        "specs/PRODUCT.md"
       ],
       "permissions": {
         "edit": "ask",
@@ -500,9 +500,9 @@ Load conditionally via opencode.json instructions array:
     },
     "default": {
       "instructions": [
-        "agents/AGENTS.md",
+        "agents/SPIRE.md",
         "agents/skills/testing.md",
-        "specs/product.md"
+        "specs/PRODUCT.md"
       ],
       "permissions": {
         "bash": {

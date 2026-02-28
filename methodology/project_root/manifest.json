@@ -14,6 +14,48 @@
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/plan.json",
+      "destination": ".opencode/agents/plan.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/default.json",
+      "destination": ".opencode/agents/default.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/verifier.json",
+      "destination": ".opencode/agents/verifier.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/docs-writer.json",
+      "destination": ".opencode/agents/docs-writer.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/investigator.json",
+      "destination": ".opencode/agents/investigator.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": ".opencode/agents/productengineer.json",
+      "destination": ".opencode/agents/productengineer.json",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
     }
   ]
 }
