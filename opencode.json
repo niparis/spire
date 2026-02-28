@@ -1,0 +1,8 @@
+{
+  "instructions": [
+    ".methodology/templates/AGENTS.md",
+    ".methodology/agents/SPIRE.md",
+    "AGENTS.md",
+    "specs/PRODUCT.md"
+  ]
+}

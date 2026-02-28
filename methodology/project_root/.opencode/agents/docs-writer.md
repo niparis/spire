@@ -15,5 +15,4 @@ permission:
 ---
 Read these files before writing documentation:
 - `.methodology/agents/DOCS_WRITER.md`
-- `.methodology/agents/SPIRE.md`
 - `AGENTS.md`

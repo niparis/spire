@@ -9,5 +9,4 @@ permission:
 ---
 Read these files before researching:
 - `.methodology/agents/INVESTIGATOR.md`
-- `.methodology/agents/SPIRE.md`
 - `AGENTS.md`
