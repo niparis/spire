@@ -2,8 +2,5 @@
 
 Use this skill to define or update `architecture/main.md`.
 
-Include:
-- System components and boundaries
-- Data flows and integration points
-- Tradeoffs and key decisions
-- Open questions and risks
+`architecture/main.md` should follow the template found in `.methodology/templates/architecture-template.md`
+
