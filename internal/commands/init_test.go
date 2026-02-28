@@ -1,17 +1,24 @@
 package commands
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"opencode-spire/internal/methodology"
 )
 
 func TestRunInitHappyPathCreatesMethodologyAndRootProjection(t *testing.T) {
 	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
 	projectRoot := t.TempDir()
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -24,12 +31,13 @@ func TestRunInitHappyPathCreatesMethodologyAndRootProjection(t *testing.T) {
 	assertFileContains(t, filepath.Join(projectRoot, ".methodology", "skills", "spec-auditor.md"), "Spec")
 	assertFileContains(t, filepath.Join(projectRoot, "AGENTS.md"), "Project")
 	assertFileContains(t, filepath.Join(projectRoot, ".gitignore"), ".methodology/")
+	assertFileContains(t, filepath.Join(projectRoot, ".methodology", ".spire-source.json"), "\"repository\": \"niparis/spire\"")
 }
 
 func TestRunInitAlreadyInitializedAborts(t *testing.T) {
 	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
 	projectRoot := t.TempDir()
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
 
 	if err := os.MkdirAll(filepath.Join(projectRoot, ".methodology"), 0o755); err != nil {
 		t.Fatalf("mkdir .methodology: %v", err)
@@ -50,8 +58,8 @@ func TestRunInitAlreadyInitializedAborts(t *testing.T) {
 
 func TestRunInitDoesNotOverwriteExistingAgentsFile(t *testing.T) {
 	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
 	projectRoot := t.TempDir()
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
 
 	existing := "# existing\nkeep me\n"
 	if err := os.WriteFile(filepath.Join(projectRoot, "AGENTS.md"), []byte(existing), 0o644); err != nil {
@@ -78,8 +86,8 @@ func TestRunInitDoesNotOverwriteExistingAgentsFile(t *testing.T) {
 
 func TestRunInitGitignoreEntryAddedOnlyOnce(t *testing.T) {
 	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
 	projectRoot := t.TempDir()
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
 
 	if err := os.WriteFile(filepath.Join(projectRoot, ".gitignore"), []byte(".methodology/\n"), 0o644); err != nil {
 		t.Fatalf("write .gitignore: %v", err)
@@ -104,6 +112,24 @@ func TestRunInitGitignoreEntryAddedOnlyOnce(t *testing.T) {
 	}
 }
 
+func TestRunInitFailsWhenSourceDownloadFails(t *testing.T) {
+	projectRoot := t.TempDir()
+
+	restore := methodology.SetCanonicalSourceForTesting("niparis/spire", "main", "https://127.0.0.1:1/not-available.tar.gz")
+	t.Cleanup(restore)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunInit(nil, projectRoot, &stdout, &stderr)
+
+	if exitCode != 1 {
+		t.Fatalf("exit code: got %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "failed to initialize methodology payload") {
+		t.Fatalf("stderr: %q", stderr.String())
+	}
+}
+
 func createMethodologySource(t *testing.T) string {
 	t.Helper()
 
@@ -125,6 +151,87 @@ func createMethodologySource(t *testing.T) string {
 }`)
 
 	return root
+}
+
+func configureCanonicalSourceFromDir(t *testing.T, sourceDir string) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tarball.tar.gz" {
+			http.NotFound(w, r)
+			return
+		}
+
+		tarballData := buildMethodologyTarball(t, sourceDir)
+		w.Header().Set("Content-Type", "application/gzip")
+		_, _ = w.Write(tarballData)
+	}))
+	t.Cleanup(server.Close)
+
+	restore := methodology.SetCanonicalSourceForTesting("niparis/spire", "main", server.URL+"/tarball.tar.gz")
+	t.Cleanup(restore)
+}
+
+func buildMethodologyTarball(t *testing.T, sourceDir string) []byte {
+	t.Helper()
+
+	var output bytes.Buffer
+	gzipWriter := gzip.NewWriter(&output)
+	tarWriter := tar.NewWriter(gzipWriter)
+
+	err := filepath.WalkDir(sourceDir, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		rel, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+
+		tarPath := filepath.ToSlash(filepath.Join("spire-main", "methodology", rel))
+		if d.IsDir() {
+			hdr := &tar.Header{Name: tarPath + "/", Typeflag: tar.TypeDir, Mode: 0o755}
+			return tarWriter.WriteHeader(hdr)
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		hdr := &tar.Header{Name: tarPath, Typeflag: tar.TypeReg, Mode: int64(info.Mode().Perm()), Size: info.Size()}
+		if err := tarWriter.WriteHeader(hdr); err != nil {
+			return err
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		if _, err := io.Copy(tarWriter, f); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("build tarball: %v", err)
+	}
+
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+
+	return output.Bytes()
 }
 
 func writeFile(t *testing.T, path string, content string) {

@@ -79,9 +79,12 @@ Format per task: Goal / Files / Tests to add / Verification step.
 - `internal/methodology/fetch.go`
 - `internal/scaffold/init_files.go`
 **Behavior notes:**
-- Sync `.methodology/` recursively from methodology payload.
+- Resolve methodology source automatically from canonical GitHub distribution.
+- Download repository tarball for selected ref and extract only `methodology/`.
+- Sync `.methodology/` recursively from extracted payload.
 - Apply project-root mappings from manifest (default policy: create-if-missing).
 - Never overwrite existing local files.
+- Persist source metadata to `.methodology/.spire-source.json`.
 **Tests:**
 - `internal/commands/init_test.go`:
   - happy path
@@ -89,6 +92,8 @@ Format per task: Goal / Files / Tests to add / Verification step.
   - existing `AGENTS.md` not overwritten
   - `.gitignore` entry added once only
   - manifest mapping creates `AGENTS.md` from `local_agents.md`
+  - fails with clear error when GitHub download/extract fails
+  - writes `.spire-source.json` with repository/ref metadata
 **Verification:** Temp repo run confirms recursive payload copy and root projection behavior.
 
 ---
@@ -99,6 +104,8 @@ Format per task: Goal / Files / Tests to add / Verification step.
 - `internal/commands/update.go`
 - `internal/methodology/update.go`
 **Behavior notes:**
+- Load `.methodology/.spire-source.json` and use it as update source of truth.
+- Fallback to canonical source defaults if metadata is missing (for migration).
 - After methodology sync, evaluate manifest mappings.
 - Never overwrite protected root files on update.
 - Print notice when source template changed but overwrite policy blocks write.
@@ -110,6 +117,8 @@ Format per task: Goal / Files / Tests to add / Verification step.
   - dirty mode continues on explicit yes
   - non-interactive dirty mode aborts safely
   - upstream `local_agents.md` change triggers notice, not overwrite
+  - metadata-driven update uses stored repository/ref
+  - missing metadata path falls back and succeeds
 **Verification:** Temp repo with dirty `.methodology/` and edited root `AGENTS.md` confirms safe behavior.
 
 ---
@@ -178,7 +187,7 @@ Format per task: Goal / Files / Tests to add / Verification step.
 - `README.md`
 - `CHANGELOG.md`
 **Tests:** None.
-**Verification:** New user can install and run first commands from README only.
+**Verification:** New user can install and run `spire init` without setting env vars.
 
 ### Task 013 — Tag v0.1.0 and validate installer end-to-end
 **Goal:** Confirm release + installer works on clean machine.
@@ -227,4 +236,4 @@ Total: ~3.0-3.5 hours of implementation time.
 | AC-7 | spire new substitutes template vars | internal/commands/new.go | new tests |
 | AC-8 | spire status shows correct state | internal/status/infer.go | status tests |
 | AC-9 | Works on macOS and Linux | build + runtime | CI matrix |
-| AC-10 | No runtime dependency beyond binary (+ git for init/update strategy) | command layer | integration + docs |
+| AC-10 | No runtime dependency beyond binary (no required git/env var for init/update) | command layer | integration + docs |

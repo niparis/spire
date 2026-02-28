@@ -107,7 +107,7 @@ func dirFileHashes(root string) (map[string]string, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if rel == syncStateFilename {
+		if rel == syncStateFilename || rel == sourceMetadataFilename {
 			return nil
 		}
 

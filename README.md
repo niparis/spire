@@ -1,41 +1,68 @@
-# opencode-spire
+# Spire
 
-`spire` is a Go CLI for managing the SDD methodology lifecycle in projects.
+`spire` bootstraps and maintains a Spec-Driven Development workflow in your repository.
+
+It operationalizes two reliability layers from the product spec:
+- Spec Quality (gate spec clarity before planning/implementation)
+- Session Continuity (feature-scoped session state, no context drift)
 
 ## Install
-
-Installer script (release flow):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/niparis/spire/main/scripts/install.sh | bash
 ```
 
-Build locally:
+Supported installer targets:
+- macOS Apple Silicon (`darwin/arm64`)
+- Windows Intel x64 (`windows/amd64`, manual binary usage)
 
-```bash
-go run ./cmd/spire --help
-```
+## Workflow in 60 Seconds
 
-Release assets:
+1. Initialize SDD scaffolding in a project:
+   ```bash
+   spire init
+   ```
+2. Create the next feature scaffold:
+   ```bash
+   spire new
+   ```
+3. Run your audit/planning flow from the generated spec.
+4. Implement and verify.
+5. Check pipeline state at any time:
+   ```bash
+   spire status
+   ```
 
-- macOS Apple Silicon: `spire_darwin_arm64`
-- Windows Intel x64: `spire_windows_amd64.exe`
+## Command Reference
 
-Windows install is manual for now: download the `.exe` from Releases and add it to your `PATH`.
-
-## Commands
-
-| Command | Description |
+| Command | Behavior |
 |---|---|
-| `spire init` | Initialize `.methodology/` and scaffold local files |
-| `spire update` | Update local methodology content |
-| `spire new` | Create a new feature spec and session log |
-| `spire status` | Show feature status table |
+| `spire init` | Downloads methodology from the canonical Spire GitHub source, syncs it into `.methodology/`, applies root projections via manifest (for example, `AGENTS.md`), and avoids overwriting existing root files |
+| `spire update` | Detects local edits in `.methodology/`, prompts in interactive mode, safely aborts in non-interactive mode, refreshes payload using `.methodology/.spire-source.json` (with canonical fallback), and reports protected-file notices |
+| `spire new` | Creates the next numbered feature spec (`max+1`) and `changes/<feature>/SESSION.md` from templates |
+| `spire status` | Scans feature artifacts and prints inferred lifecycle state (`Spec only` -> `Awaiting PR` -> `Complete`) |
 
-## Contributing
+## File Model
 
-Start with:
+- `.methodology/` is the synced methodology payload managed by `spire`.
+- `.methodology/project_root/manifest.json` controls which files are projected to repository root.
+- `.methodology/.spire-source.json` stores where methodology was fetched from for deterministic updates.
+- Canonical session continuity file is always `changes/[feature]/SESSION.md`.
 
-```bash
-go test ./...
-```
+`spire init` and `spire update` do not require `SPIRE_METHODOLOGY_SOURCE`.
+
+## Versioning and Distribution
+
+- Tags follow `vX.Y.Z` and trigger release builds.
+- Release assets are published to GitHub Releases for supported targets.
+- Installer defaults to latest release unless overridden via installer env vars.
+
+## Troubleshooting
+
+- `Run spire init first.`: initialize the repository before `update`/feature flows.
+- Installer succeeded but `spire` not found: add install directory to your `PATH`.
+- `spire update` blocked by local edits: stash or revert local `.methodology/` changes first.
+
+## Related Docs
+
+- `specs/PRODUCT.md`

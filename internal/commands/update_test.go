@@ -6,12 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"opencode-spire/internal/methodology"
 )
 
 func TestRunUpdateWithoutMethodologyAborts(t *testing.T) {
 	projectRoot := t.TempDir()
 	source := createMethodologySource(t)
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
+	configureCanonicalSourceFromDir(t, source)
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -28,7 +30,7 @@ func TestRunUpdateWithoutMethodologyAborts(t *testing.T) {
 func TestRunUpdateCleanReportsChangedFiles(t *testing.T) {
 	projectRoot := t.TempDir()
 	source := createMethodologySource(t)
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
+	configureCanonicalSourceFromDir(t, source)
 
 	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("init failed with code %d", code)
@@ -55,7 +57,7 @@ func TestRunUpdateCleanReportsChangedFiles(t *testing.T) {
 func TestRunUpdateDirtyPromptsAndAbortsOnNo(t *testing.T) {
 	projectRoot := t.TempDir()
 	source := createMethodologySource(t)
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
+	configureCanonicalSourceFromDir(t, source)
 
 	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("init failed with code %d", code)
@@ -81,7 +83,7 @@ func TestRunUpdateDirtyPromptsAndAbortsOnNo(t *testing.T) {
 func TestRunUpdateDirtyContinuesOnYes(t *testing.T) {
 	projectRoot := t.TempDir()
 	source := createMethodologySource(t)
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
+	configureCanonicalSourceFromDir(t, source)
 
 	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("init failed with code %d", code)
@@ -104,7 +106,7 @@ func TestRunUpdateDirtyContinuesOnYes(t *testing.T) {
 func TestRunUpdateDirtyNonInteractiveAborts(t *testing.T) {
 	projectRoot := t.TempDir()
 	source := createMethodologySource(t)
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
+	configureCanonicalSourceFromDir(t, source)
 
 	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("init failed with code %d", code)
@@ -127,7 +129,7 @@ func TestRunUpdateDirtyNonInteractiveAborts(t *testing.T) {
 func TestRunUpdateRootMappingNoticeWithoutOverwrite(t *testing.T) {
 	projectRoot := t.TempDir()
 	source := createMethodologySource(t)
-	t.Setenv("SPIRE_METHODOLOGY_SOURCE", source)
+	configureCanonicalSourceFromDir(t, source)
 
 	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("init failed with code %d", code)
@@ -157,5 +159,58 @@ func TestRunUpdateRootMappingNoticeWithoutOverwrite(t *testing.T) {
 	}
 	if string(data) != "custom local\n" {
 		t.Fatalf("AGENTS.md overwritten: %q", string(data))
+	}
+}
+
+func TestRunUpdateUsesStoredMetadataOverCurrentDefaults(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	writeFile(t, filepath.Join(source, "skills", "spec-auditor.md"), "# Spec v2\n")
+
+	restoreBad := methodology.SetCanonicalSourceForTesting("niparis/spire", "main", "https://127.0.0.1:1/not-used.tar.gz")
+	t.Cleanup(restoreBad)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "skills/spec-auditor.md") {
+		t.Fatalf("stdout missing changed file: %q", stdout.String())
+	}
+}
+
+func TestRunUpdateFallsBackWhenMetadataMissing(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	if err := os.Remove(filepath.Join(projectRoot, ".methodology", ".spire-source.json")); err != nil {
+		t.Fatalf("remove source metadata: %v", err)
+	}
+
+	writeFile(t, filepath.Join(source, "skills", "spec-auditor.md"), "# Spec v2\n")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "updated .methodology") {
+		t.Fatalf("stdout: %q", stdout.String())
 	}
 }

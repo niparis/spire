@@ -20,13 +20,7 @@ func RunInit(args []string, projectRoot string, stdout io.Writer, stderr io.Writ
 		return 1
 	}
 
-	source, err := methodology.ResolveSource()
-	if err != nil {
-		fmt.Fprintf(stderr, "failed to resolve methodology source: %v\n", err)
-		return 1
-	}
-
-	if _, err := methodology.SyncToProject(source, projectRoot); err != nil {
+	if _, _, err := methodology.SyncCanonicalToProject(projectRoot); err != nil {
 		fmt.Fprintf(stderr, "failed to initialize methodology payload: %v\n", err)
 		return 1
 	}
