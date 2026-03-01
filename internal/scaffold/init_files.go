@@ -79,7 +79,7 @@ func ApplyProjectRootInitMappings(projectRoot string, methodologyDir string, out
 		return err
 	}
 
-	sourceRoot := filepath.Join(methodologyDir, "project_root")
+	sourceRoot := methodologyDir
 	actions, err := BuildProjectRootActions(manifest, sourceRoot, ModeInit)
 	if err != nil {
 		return err
@@ -114,7 +114,7 @@ func ApplyProjectRootUpdateMappings(projectRoot string, methodologyDir string, c
 		return err
 	}
 
-	sourceRoot := filepath.Join(methodologyDir, "project_root")
+	sourceRoot := methodologyDir
 	actions, err := BuildProjectRootActions(manifest, sourceRoot, ModeUpdate)
 	if err != nil {
 		return err

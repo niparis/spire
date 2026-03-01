@@ -174,58 +174,58 @@ func createMethodologySource(t *testing.T) string {
 	writeFile(t, filepath.Join(root, "agents", "SPIRE.md"), "# SPIRE\n")
 	writeFile(t, filepath.Join(root, "project_root", "local_agents.md"), "# Project\n")
 	writeFile(t, filepath.Join(root, "project_root", "opencode.json"), "{\n  \"instructions\": [\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
-	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "featureplanner.md"), "---\nmode: subagent\n---\nRead .methodology/agents/FEATURE_PLANNER.md and .methodology/agents/SPIRE.md\n")
-	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "verifier.md"), "---\nmode: subagent\n---\nRead .methodology/agents/VERIFICATION.md and .methodology/agents/SPIRE.md\n")
-	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "docs-writer.md"), "---\nmode: subagent\n---\nRead .methodology/agents/DOCS_WRITER.md and .methodology/agents/SPIRE.md\n")
-	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "investigator.md"), "---\nmode: subagent\n---\nRead .methodology/agents/INVESTIGATOR.md and .methodology/agents/SPIRE.md\n")
+	writeFile(t, filepath.Join(root, "subagents", "featureplanner.md"), "---\nmode: subagent\n---\nRead .methodology/agents/FEATURE_PLANNER.md and .methodology/agents/SPIRE.md\n")
+	writeFile(t, filepath.Join(root, "subagents", "verifier.md"), "---\nmode: subagent\n---\nRead .methodology/agents/VERIFICATION.md and .methodology/agents/SPIRE.md\n")
+	writeFile(t, filepath.Join(root, "subagents", "docs-writer.md"), "---\nmode: subagent\n---\nRead .methodology/agents/DOCS_WRITER.md and .methodology/agents/SPIRE.md\n")
+	writeFile(t, filepath.Join(root, "subagents", "investigator.md"), "---\nmode: subagent\n---\nRead .methodology/agents/INVESTIGATOR.md and .methodology/agents/SPIRE.md\n")
 	writeFile(t, filepath.Join(root, "project_root", ".opencode", "agents", "productengineer.md"), "---\nmode: primary\n---\nRead .methodology/agents/ARCHITECTURE.md and specs/PRODUCT.md\n")
 	writeFile(t, filepath.Join(root, "project_root", "manifest.json"), `{
   "version": 1,
   "mappings": [
     {
-      "source": "local_agents.md",
+      "source": "project_root/local_agents.md",
       "destination": "AGENTS.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": "opencode.json",
+      "source": "project_root/opencode.json",
       "destination": "opencode.json",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/featureplanner.md",
+      "source": "subagents/featureplanner.md",
       "destination": ".opencode/agents/featureplanner.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/verifier.md",
+      "source": "subagents/verifier.md",
       "destination": ".opencode/agents/verifier.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/docs-writer.md",
+      "source": "subagents/docs-writer.md",
       "destination": ".opencode/agents/docs-writer.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/investigator.md",
+      "source": "subagents/investigator.md",
       "destination": ".opencode/agents/investigator.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/productengineer.md",
+      "source": "project_root/.opencode/agents/productengineer.md",
       "destination": ".opencode/agents/productengineer.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
