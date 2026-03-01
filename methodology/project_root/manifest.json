@@ -2,49 +2,49 @@
   "version": 1,
   "mappings": [
     {
-      "source": "local_agents.md",
+      "source": "project_root/local_agents.md",
       "destination": "AGENTS.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": "opencode.json",
+      "source": "project_root/opencode.json",
       "destination": "opencode.json",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/featureplanner.md",
+      "source": "subagents/featureplanner.md",
       "destination": ".opencode/agents/featureplanner.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/verifier.md",
+      "source": "subagents/verifier.md",
       "destination": ".opencode/agents/verifier.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/docs-writer.md",
+      "source": "subagents/docs-writer.md",
       "destination": ".opencode/agents/docs-writer.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/investigator.md",
+      "source": "subagents/investigator.md",
       "destination": ".opencode/agents/investigator.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
     },
     {
-      "source": ".opencode/agents/productengineer.md",
+      "source": "project_root/.opencode/agents/productengineer.md",
       "destination": ".opencode/agents/productengineer.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
