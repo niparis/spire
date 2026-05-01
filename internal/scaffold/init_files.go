@@ -107,7 +107,7 @@ func ApplyProjectRootInitMappings(projectRoot string, methodologyDir string, out
 	return nil
 }
 
-func ApplyProjectRootUpdateMappings(projectRoot string, methodologyDir string, changedMethodologyFiles []string, out io.Writer) error {
+func ApplyProjectRootUpdateMappings(projectRoot string, methodologyDir string, changedMethodologyFiles []string, force bool, out io.Writer) error {
 	manifestPath := filepath.Join(methodologyDir, "project_root", "manifest.json")
 	manifest, err := LoadProjectRootManifest(manifestPath)
 	if err != nil {
@@ -139,6 +139,14 @@ func ApplyProjectRootUpdateMappings(projectRoot string, methodologyDir string, c
 		sourceRel = filepath.ToSlash(sourceRel)
 
 		if exists && action.Policy == PolicyNeverOverwrite {
+			if force {
+				if err := copyFile(action.Source, destination); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "force-updated: %s\n", action.Destination)
+				continue
+			}
+
 			if isManagedOpencodeDestination(action.Destination) && changedSet[sourceRel] {
 				if err := copyFile(action.Source, destination); err != nil {
 					return err
@@ -148,7 +156,7 @@ func ApplyProjectRootUpdateMappings(projectRoot string, methodologyDir string, c
 			}
 
 			if action.NotifyIfSourceChanged && changedSet[sourceRel] {
-				fmt.Fprintf(out, "notice: upstream %s changed; kept existing %s\n", sourceRel, action.Destination)
+				fmt.Fprintf(out, "notice: upstream %s changed; kept existing %s (rerun with --force to overwrite)\n", sourceRel, action.Destination)
 			}
 			continue
 		}

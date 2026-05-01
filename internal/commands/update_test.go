@@ -126,6 +126,21 @@ func TestRunUpdateDirtyNonInteractiveAborts(t *testing.T) {
 	}
 }
 
+func TestRunUpdateUnknownFlagAborts(t *testing.T) {
+	projectRoot := t.TempDir()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := RunUpdate([]string{"--unknown"}, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 1 {
+		t.Fatalf("exit code: got %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "unknown update flag: --unknown") {
+		t.Fatalf("stderr: %q", stderr.String())
+	}
+}
+
 func TestRunUpdateRootMappingNoticeWithoutOverwrite(t *testing.T) {
 	projectRoot := t.TempDir()
 	source := createMethodologySource(t)
@@ -149,7 +164,7 @@ func TestRunUpdateRootMappingNoticeWithoutOverwrite(t *testing.T) {
 		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
 	}
 
-	if !strings.Contains(stdout.String(), "notice: upstream project_root/local_agents.md changed; kept existing AGENTS.md") {
+	if !strings.Contains(stdout.String(), "notice: upstream project_root/local_agents.md changed; kept existing AGENTS.md (rerun with --force to overwrite)") {
 		t.Fatalf("missing notice: %q", stdout.String())
 	}
 
@@ -159,6 +174,60 @@ func TestRunUpdateRootMappingNoticeWithoutOverwrite(t *testing.T) {
 	}
 	if string(data) != "custom local\n" {
 		t.Fatalf("AGENTS.md overwritten: %q", string(data))
+	}
+}
+
+func TestRunUpdateForceOverwritesProtectedRootMapping(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	localPath := filepath.Join(projectRoot, "opencode.json")
+	if err := os.WriteFile(localPath, []byte("{\"local\":true}\n"), 0o644); err != nil {
+		t.Fatalf("write local opencode.json: %v", err)
+	}
+
+	upstreamContent := "{\n  \"instructions\": [\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\",\n    \".methodology/agents/CODE.md\"\n  ]\n}\n"
+	writeFile(t, filepath.Join(source, "project_root", "opencode.json"), upstreamContent)
+
+	var firstStdout bytes.Buffer
+	var firstStderr bytes.Buffer
+	firstExitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &firstStdout, &firstStderr)
+	if firstExitCode != 0 {
+		t.Fatalf("first update exit code: got %d, stderr=%q", firstExitCode, firstStderr.String())
+	}
+	if !strings.Contains(firstStdout.String(), "notice: upstream project_root/opencode.json changed; kept existing opencode.json (rerun with --force to overwrite)") {
+		t.Fatalf("missing protected notice: %q", firstStdout.String())
+	}
+
+	data, err := os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read local opencode.json: %v", err)
+	}
+	if string(data) != "{\"local\":true}\n" {
+		t.Fatalf("opencode.json overwritten without force: %q", string(data))
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate([]string{"--force"}, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "force-updated: opencode.json") {
+		t.Fatalf("missing force update notice: %q", stdout.String())
+	}
+
+	data, err = os.ReadFile(localPath)
+	if err != nil {
+		t.Fatalf("read local opencode.json after force: %v", err)
+	}
+	if string(data) != upstreamContent {
+		t.Fatalf("opencode.json was not force-updated; got %q", string(data))
 	}
 }
 

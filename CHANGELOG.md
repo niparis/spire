@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.0
+
+- Add `spire update --force` to overwrite protected project-root projections such as `opencode.json`.
+- Show a `--force` hint when upstream protected files change but local files are kept.
+
 ## 0.1.0
 
 - Initial Go CLI scaffold for `spire`.

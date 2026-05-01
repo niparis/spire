@@ -13,6 +13,12 @@ import (
 )
 
 func RunUpdate(args []string, projectRoot string, stdin io.Reader, interactive bool, stdout io.Writer, stderr io.Writer) int {
+	options, err := parseUpdateArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+
 	methodologyPath := filepath.Join(projectRoot, ".methodology")
 	info, err := os.Stat(methodologyPath)
 	if err != nil {
@@ -78,12 +84,31 @@ func RunUpdate(args []string, projectRoot string, stdin io.Reader, interactive b
 		}
 	}
 
-	if err := scaffold.ApplyProjectRootUpdateMappings(projectRoot, methodologyPath, changedFiles, stdout); err != nil {
+	if err := scaffold.ApplyProjectRootUpdateMappings(projectRoot, methodologyPath, changedFiles, options.forceProjectRoot, stdout); err != nil {
 		fmt.Fprintf(stderr, "failed to apply project root mappings: %v\n", err)
 		return 1
 	}
 
 	return 0
+}
+
+type updateOptions struct {
+	forceProjectRoot bool
+}
+
+func parseUpdateArgs(args []string) (updateOptions, error) {
+	var options updateOptions
+
+	for _, arg := range args {
+		switch arg {
+		case "--force", "-f":
+			options.forceProjectRoot = true
+		default:
+			return updateOptions{}, fmt.Errorf("unknown update flag: %s", arg)
+		}
+	}
+
+	return options, nil
 }
 
 func confirmProceed(stdin io.Reader, stderr io.Writer) bool {
