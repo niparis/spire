@@ -8,7 +8,7 @@
     "review_against_specs": {
       "description": "Review an implementation against a feature specification. Identifies missing, incorrect, or extra functionality, as well as spec gaps and testing issues. Does not modify code.",
       "temperature": 0.1,
-      "prompt": "{file:./.methhodology/subagents/review_against_spec.md}",
+      "prompt": "{file:./.methodology/subagents/review_against_spec.md}",
       "mode": "subagent",
       "color": "#ff6b6b"
     }
