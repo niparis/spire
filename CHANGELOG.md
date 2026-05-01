@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0
+## 0.5.0
 
 - Add `spire update --force` to overwrite protected project-root projections such as `opencode.json`.
 - Show a `--force` hint when upstream protected files change but local files are kept.
