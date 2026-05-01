@@ -68,7 +68,7 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init      Initialize project methodology")
-	fmt.Fprintln(w, "  update    Update local methodology")
+	fmt.Fprintln(w, "  update    Update local methodology (--force overwrites protected root projections)")
 	fmt.Fprintln(w, "  new       Create a new feature spec")
 	fmt.Fprintln(w, "  status    Show feature status table")
 	fmt.Fprintln(w, "  upgrade   Upgrade spire executable")

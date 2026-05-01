@@ -123,7 +123,7 @@ flowchart TD
 | Command | Behavior |
 |---|---|
 | `spire init` | Downloads methodology from the canonical Spire GitHub source, syncs it into `.methodology/`, applies root projections via manifest (for example, `AGENTS.md`), and avoids overwriting existing root files |
-| `spire update` | Detects local edits in `.methodology/`, prompts in interactive mode, safely aborts in non-interactive mode, refreshes payload using `.methodology/.spire-source.json` (with canonical fallback), and reports protected-file notices |
+| `spire update` | Detects local edits in `.methodology/`, prompts in interactive mode, safely aborts in non-interactive mode, refreshes payload using `.methodology/.spire-source.json` (with canonical fallback), and reports protected-file notices. Use `spire update --force` to overwrite protected project-root projections such as `opencode.json` from the current methodology payload |
 | `spire upgrade` | Checks GitHub Releases for a newer `spire` version and replaces the current executable only when a newer release is available |
 | `spire new` | Creates the next numbered feature spec (`max+1`) and `changes/<feature>/SESSION.md` from templates |
 | `spire status` | Scans feature artifacts and prints inferred lifecycle state (`Spec only` -> `Awaiting PR` -> `Complete`) |
@@ -149,6 +149,7 @@ flowchart TD
 - `Run spire init first.`: initialize the repository before `update`/feature flows.
 - Installer succeeded but `spire` not found: add install directory to your `PATH`.
 - `spire update` blocked by local edits: stash or revert local `.methodology/` changes first.
+- Protected root file kept during update: rerun `spire update --force` to replace protected projections such as `opencode.json` with the versions from `.methodology/`.
 
 ## Verification Independence
 
