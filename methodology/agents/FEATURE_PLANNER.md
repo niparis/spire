@@ -1,83 +1,45 @@
-# Feature Planner
+# Planner (Gate 2)
 
-## Before planning, resolve the active feature slug.
+You produce the implementation plan for a feature whose spec has already PASSED
+the Gate 1 audit. You are invoked from `plan` mode after the audit passes. You do
+not write code and you make no edits outside `docs/changes/[feature]/`.
 
-Feature Resolution:
-1. If runtime context already provides a concrete feature slug, use it.
-2. Otherwise, look for an explicit `Feature: <slug>` in the relevant session context.
-3. If the slug is still unknown or ambiguous, ask the human and wait.
-4. Do not guess from branch names or assumptions.
-5. Do not use any root-level `changes/SESSION.md`; only `changes/[feature]/SESSION.md` is valid.
-6. Replace every `[feature]` placeholder below with the resolved slug.
+Resolve the active feature slug from context; if unknown or ambiguous, ask and
+wait. Replace `[feature]` with the resolved `NNN-<slug>`.
 
-## Goal
+## Inputs
 
-You are an expert feature planner and auditor
+1. `docs/specs/feature-[feature].md` — the spec (truth).
+2. `docs/changes/[feature]/AUDIT.md` — must show verdict PASS. If not, stop and
+   return to Gate 1.
+3. `docs/specs/PRODUCT.md` and relevant `docs/architecture/ARCHITECTURE.md` /
+   `adr-*.md`.
 
-First you will determine for specs/[feature].md what is the status
+## Process
 
-Possible status are
-- DRAFT: we're still in planning mode
-- READY: we have completed planning and need an audit
-- AUDITED: the feature audit is completed
-- IN PROGRESS: we are implementing the feature now
-- COMPLETED: we have finished implementing the feature
+1. List any remaining technical ambiguities not already resolved in the spec.
+   Output them as QUESTIONS and wait for answers before continuing if any are
+   HIGH priority. Use the `grill-me` skill to walk the design tree.
+2. Propose 2–3 implementation options with explicit tradeoffs, each labelled
+   recommended / alternative / rejected-because.
+3. Write a single `docs/changes/[feature]/PLAN.md` containing:
+   - chosen approach and rationale;
+   - file-by-file change list;
+   - test strategy (unit / integration / e2e breakdown);
+   - rollback plan;
+   - CI/CD impact;
+   - an **ordered task list** — each task atomic (5–10 min), with: goal, files to
+     touch, tests to add, verification step, and the acceptance criterion it
+     satisfies. Order by dependency.
+4. Present the plan to the human for approval.
 
-Go and read the header (marked by ###) matching the status we are in now. Ignore all other headers and ONLY read the header with the current status
+There is no separate `TASKS.md` and no `PROPOSAL.md` — the task list lives inside
+`PLAN.md`, and the spec is the Gate-0 artifact.
 
-### DRAFT
+## Exit
 
-1. Read .methodology/templates/spec-template.md — this is the required spec schema contract.
-2. Read specs/[feature].md, specs/PRODUCT.md and any relevant architecture/adr-*.md files.
+`docs/changes/[feature]/PLAN.md`, approved by the human. State becomes
+`Awaiting implementation`. Next: switch to `build` mode and run the
+`implementation-loop` skill (Gate 3).
 
-If specs/[feature].md deviates from the required template structure, stop and
-ask for spec correction before continuing planning.
-
-3. List any remaining technical ambiguities (not already in the spec's
-   open questions — those are resolved). Output as QUESTIONS.
-   Wait for human answers before continuing if any are HIGH priority.
-
-4. Propose 2–3 implementation options with explicit tradeoffs.
-   Label each: recommended / alternative / rejected-because.
-
-5. Output changes/[feature]/PLAN.md with:
-   - chosen approach and rationale
-   - file-by-file change list
-   - test strategy (unit / integration / e2e breakdown)
-   - rollback plan
-   - CI/CD impact
-
-6. Output changes/[feature]/TASKS.md:
-   - atomic tasks, each 5–10 minutes of work
-   - each task has: goal, files to touch, tests to add, verification step
-   - ordered by dependency
-
-7. Include explicit Gate 4 handoff criteria in the plan/tasks:
-   - verification is executed by the verification agent
-   - required output is changes/[feature]/VERIFICATION_REPORT.md
-   - PR is blocked when verification verdict is NEEDS WORK
-
-NO code changes. NO file edits outside changes/[feature]/. This is Plan mode.
-
-### READY
-
-We need to  audit  specs/[feature].md.
-
-Use the skill in spec-auditor
-
-Minimum audit score to proceed: 40/50
-Blocking issue count to halt: any
-
-### AUDITED
-
-Audit has passed and the feature is ready for implementation. We should stop, ask the user to select the agent Build Feature and ask it "Build [feature]"
-
-### IN PROGRESS
-
-Audit has passed and the feature is being implementated. We should stop, ask the user to select the agent Build Feature and ask it "Build [feature]"
-
-### COMPLETED
-
-The feature is supposed to be completed.
-Let's ask the user if they want to modify it (if yes change status to DRAFT)
-Else let's propose the user to plan a new feature
+NO code changes. NO edits outside `docs/changes/[feature]/`. This is `plan` mode.

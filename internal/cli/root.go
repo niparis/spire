@@ -37,20 +37,6 @@ func Execute(args []string, stdout io.Writer, stderr io.Writer) int {
 			return 1
 		}
 		return commands.RunUpdate(args[1:], cwd, os.Stdin, isInteractiveStdin(os.Stdin), stdout, stderr)
-	case "new":
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(stderr, "failed to determine working directory: %v\n", err)
-			return 1
-		}
-		return commands.RunNew(args[1:], cwd, os.Stdin, stdout, stderr)
-	case "status":
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(stderr, "failed to determine working directory: %v\n", err)
-			return 1
-		}
-		return commands.RunStatus(args[1:], cwd, stdout, stderr)
 	case "upgrade":
 		return commands.RunUpgrade(args[1:], Version, stdout, stderr)
 	default:
@@ -69,8 +55,6 @@ func printHelp(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init      Initialize project methodology")
 	fmt.Fprintln(w, "  update    Update local methodology (--force overwrites protected root projections)")
-	fmt.Fprintln(w, "  new       Create a new feature spec")
-	fmt.Fprintln(w, "  status    Show feature status table")
 	fmt.Fprintln(w, "  upgrade   Upgrade spire executable")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")

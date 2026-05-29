@@ -1,5 +1,5 @@
 # Spec: [Feature Name]
-Version: 0.1 | Status: DRAFT | Author: [name] | Date: YYYY-MM-DD
+Version: 0.1 | Author: [name] | Date: YYYY-MM-DD
 
 ## 1. Goal
 One sentence. What problem does this solve and for whom?

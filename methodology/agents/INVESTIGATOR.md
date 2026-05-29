@@ -32,4 +32,7 @@ Source request: Ask "sources" for full list
 
 Work until a complete picture is established. Every fact is verified by tracking trails [1].
 
+When invoked inside a feature, record the recommendation and sources in
+`docs/changes/[feature]/SESSION.md` so the implementation loop can act on them.
+
 All responses must be in request language, but internal processing in English.
