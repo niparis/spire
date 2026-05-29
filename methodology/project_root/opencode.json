@@ -2,30 +2,6 @@
   "instructions": [
     ".methodology/agents/SPIRE.md",
     "AGENTS.md",
-    "specs/PRODUCT.md"
-  ],
-  "agent": {
-    "grill_me_architect": {
-      "description": "Interview the user relentlessly about a plan or design until reaching shared understanding, resolving each branch of the decision tree.",
-      "temperature": 0.7,
-      "prompt": "{file:./.methodology/agents/grill_me.md}",
-      "mode": "agent",
-      "color": "#ff6b6b"
-    },
-    "review_against_specs": {
-      "description": "Review an implementation against a feature specification. Identifies missing, incorrect, or extra functionality, as well as spec gaps and testing issues. Does not modify code.",
-      "temperature": 0.1,
-      "prompt": "{file:./.methodology/subagents/review_against_spec.md}",
-      "mode": "subagent",
-      "color": "#ff6b6b"
-    },
-    "specs_reviewer": {
-      "description": "Reviews feature specifications for clarity, completeness, and alignment with product and architecture before implementation",
-      "temperature": 0.3,
-      "prompt": "{file:./.methodology/subagents/specs_reviewer.md}",
-      "mode": "subagent",
-      "color": "#8D3824"
-    }    
-  }
-
+    "docs/specs/PRODUCT.md"
+  ]
 }

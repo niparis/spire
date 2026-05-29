@@ -3,7 +3,7 @@ Last updated: YYYY-MM-DD HH:MM | Agent: [model used]
 
 ## Status
 Overall: [% complete estimate]
-Current phase: [which task from TASKS.md]
+Current phase: [which task from PLAN.md]
 
 ## Completed (with commit refs)
 - [task description] → commit abc1234

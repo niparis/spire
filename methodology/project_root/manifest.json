@@ -16,8 +16,15 @@
       "notify_if_source_changed": true
     },
     {
-      "source": "subagents/featureplanner.md",
-      "destination": ".opencode/agents/featureplanner.md",
+      "source": "subagents/spec-auditor.md",
+      "destination": ".opencode/agents/spec-auditor.md",
+      "on_init": "if_missing",
+      "on_update": "never_overwrite",
+      "notify_if_source_changed": true
+    },
+    {
+      "source": "subagents/planner.md",
+      "destination": ".opencode/agents/planner.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
@@ -39,13 +46,6 @@
     {
       "source": "subagents/investigator.md",
       "destination": ".opencode/agents/investigator.md",
-      "on_init": "if_missing",
-      "on_update": "never_overwrite",
-      "notify_if_source_changed": true
-    },
-    {
-      "source": "project_root/.opencode/agents/productengineer.md",
-      "destination": ".opencode/agents/productengineer.md",
       "on_init": "if_missing",
       "on_update": "never_overwrite",
       "notify_if_source_changed": true
