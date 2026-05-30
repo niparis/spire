@@ -324,3 +324,126 @@ func TestRunUpdateFallsBackWhenMetadataMissing(t *testing.T) {
 		t.Fatalf("stdout: %q", stdout.String())
 	}
 }
+
+func TestRunUpdateCreatesSkills(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	assertFileContains(t, filepath.Join(projectRoot, ".opencode", "skills", "spire-product-definition", "SKILL.md"), "Product Definition")
+	assertFileContains(t, filepath.Join(projectRoot, ".opencode", "skills", "spire-new-feature", "SKILL.md"), "New Feature")
+	assertFileContains(t, filepath.Join(projectRoot, ".opencode", "skills", "spire-grill-me", "SKILL.md"), "Grill Me")
+	assertFileContains(t, filepath.Join(projectRoot, ".opencode", "skills", "spire-architecture-definition", "SKILL.md"), "Architecture Definition")
+}
+
+func TestRunUpdateRemovesStaleAgent(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	stalePath := filepath.Join(projectRoot, ".opencode", "agents", "stale-agent.md")
+	if err := os.WriteFile(stalePath, []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("write stale agent: %v", err)
+	}
+
+	methodologyDir := filepath.Join(projectRoot, ".methodology")
+	if err := methodology.WriteSyncStateProjections(methodologyDir, map[string]bool{
+		".opencode/agents/stale-agent.md": true,
+	}); err != nil {
+		t.Fatalf("write sync state projections: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("stale agent was not removed")
+	}
+
+	if !strings.Contains(stdout.String(), "removed stale: .opencode/agents/stale-agent.md") {
+		t.Fatalf("missing stale removal notice: %q", stdout.String())
+	}
+}
+
+func TestRunUpdatePreservesCustomFiles(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	customPath := filepath.Join(projectRoot, ".opencode", "agents", "custom-agent.md")
+	customContent := "# custom\n"
+	if err := os.WriteFile(customPath, []byte(customContent), 0o644); err != nil {
+		t.Fatalf("write custom agent: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	data, err := os.ReadFile(customPath)
+	if err != nil {
+		t.Fatalf("read custom agent: %v", err)
+	}
+	if string(data) != customContent {
+		t.Fatalf("custom agent was modified: %q", string(data))
+	}
+
+	if strings.Contains(stdout.String(), "removed stale") && strings.Contains(stdout.String(), "custom-agent") {
+		t.Fatalf("custom agent incorrectly reported as stale: %q", stdout.String())
+	}
+}
+
+func TestRunUpdateIdempotent(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	var firstStdout bytes.Buffer
+	var firstStderr bytes.Buffer
+	if exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &firstStdout, &firstStderr); exitCode != 0 {
+		t.Fatalf("first update failed with code %d, stderr=%q", exitCode, firstStderr.String())
+	}
+
+	var secondStdout bytes.Buffer
+	var secondStderr bytes.Buffer
+	if exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &secondStdout, &secondStderr); exitCode != 0 {
+		t.Fatalf("second update failed with code %d, stderr=%q", exitCode, secondStderr.String())
+	}
+
+	if strings.Contains(secondStdout.String(), "removed stale") {
+		t.Fatalf("second update spuriously reported removals: %q", secondStdout.String())
+	}
+}
