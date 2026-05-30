@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2
+
+- Restructure `product-definition` and `architecture-definition` skills from flat files to `skill-name/SKILL.md` subfolders with YAML frontmatter, matching the convention used by other skills.
+- Reword `spire update` dirty-files warning to explain that continuing will overwrite local changes with upstream versions.
+
 ## 1.0.1
 
 - `spire update` now removes stale projections from `.opencode/agents/` and `.opencode/skills/` that are no longer in the manifest or human-invoked skills list.
