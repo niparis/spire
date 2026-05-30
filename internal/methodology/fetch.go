@@ -315,7 +315,7 @@ func SyncToProject(sourceDir string, projectRoot string) (string, error) {
 		return "", err
 	}
 
-	if err := writeSyncState(destination, hashes); err != nil {
+	if err := writeSyncState(destination, &syncState{Hashes: hashes}); err != nil {
 		return "", err
 	}
 

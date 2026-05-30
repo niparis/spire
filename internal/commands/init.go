@@ -35,6 +35,24 @@ func RunInit(args []string, projectRoot string, stdout io.Writer, stderr io.Writ
 		return 1
 	}
 
+	if err := scaffold.ApplySkillProjections(methodologyPath, projectRoot, stdout); err != nil {
+		fmt.Fprintf(stderr, "failed to apply skill projections: %v\n", err)
+		return 1
+	}
+
+	manifestPath := filepath.Join(methodologyPath, "project_root", "manifest.json")
+	manifest, err := scaffold.LoadProjectRootManifest(manifestPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "failed to load manifest: %v\n", err)
+		return 1
+	}
+
+	expected := scaffold.BuildExpectedProjections(manifest)
+	if err := methodology.WriteSyncStateProjections(methodologyPath, expected); err != nil {
+		fmt.Fprintf(stderr, "failed to write sync state projections: %v\n", err)
+		return 1
+	}
+
 	fmt.Fprintln(stdout, "initialized .methodology")
 	return 0
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- `spire update` now removes stale projections from `.opencode/agents/` and `.opencode/skills/` that are no longer in the manifest or human-invoked skills list.
+- Human-invoked skills (`product-definition`, `new-feature`, `grill-me`, `architecture-definition`) are now copied to `.opencode/skills/spire-*/SKILL.md` during `spire init` and `spire update`, making them discoverable by OpenCode.
+- Sync state (`.spire-sync-state.json`) now tracks projected files to distinguish spire-managed files from user-created ones.
+
 ## 1.0.0
 
 Breaking changes — the methodology is rebuilt around OpenCode's built-in modes:
