@@ -13,7 +13,8 @@ import (
 const syncStateFilename = ".spire-sync-state.json"
 
 type syncState struct {
-	Hashes map[string]string `json:"hashes"`
+	Hashes      map[string]string `json:"hashes"`
+	Projections map[string]string `json:"projections,omitempty"`
 }
 
 func DetectDirty(localDir string) ([]string, error) {
@@ -77,7 +78,16 @@ func SyncAndReportChanges(localDir string, sourceDir string) ([]string, error) {
 		}
 	}
 
-	if err := writeSyncState(localDir, afterHashes); err != nil {
+	existingProjections := map[string]string{}
+	state, err := readSyncState(localDir)
+	if err != nil {
+		return nil, err
+	}
+	if state != nil {
+		existingProjections = state.Projections
+	}
+
+	if err := writeSyncState(localDir, &syncState{Hashes: afterHashes, Projections: existingProjections}); err != nil {
 		return nil, err
 	}
 
@@ -158,12 +168,14 @@ func readSyncState(localDir string) (*syncState, error) {
 	if state.Hashes == nil {
 		state.Hashes = map[string]string{}
 	}
+	if state.Projections == nil {
+		state.Projections = map[string]string{}
+	}
 
 	return &state, nil
 }
 
-func writeSyncState(localDir string, hashes map[string]string) error {
-	state := syncState{Hashes: hashes}
+func writeSyncState(localDir string, state *syncState) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("serialize sync state: %w", err)
@@ -174,4 +186,37 @@ func writeSyncState(localDir string, hashes map[string]string) error {
 	}
 
 	return nil
+}
+
+func ReadSyncStateProjections(localDir string) (map[string]bool, error) {
+	state, err := readSyncState(localDir)
+	if err != nil {
+		return nil, err
+	}
+	if state == nil {
+		return nil, nil
+	}
+
+	result := make(map[string]bool, len(state.Projections))
+	for path := range state.Projections {
+		result[path] = true
+	}
+	return result, nil
+}
+
+func WriteSyncStateProjections(localDir string, projections map[string]bool) error {
+	state, err := readSyncState(localDir)
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		state = &syncState{Hashes: map[string]string{}}
+	}
+
+	state.Projections = make(map[string]string, len(projections))
+	for path := range projections {
+		state.Projections[path] = ""
+	}
+
+	return writeSyncState(localDir, state)
 }
