@@ -75,7 +75,10 @@ func TestRunUpdateDirtyPromptsAndAbortsOnNo(t *testing.T) {
 	if !strings.Contains(stderr.String(), "warning: local edits detected") {
 		t.Fatalf("stderr missing warning: %q", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "stash or remove local edits first") {
+	if !strings.Contains(stderr.String(), "continuing will overwrite") {
+		t.Fatalf("stderr missing overwrite warning: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stash, remove, or back up local edits first") {
 		t.Fatalf("stderr missing abort guidance: %q", stderr.String())
 	}
 }
@@ -123,6 +126,9 @@ func TestRunUpdateDirtyNonInteractiveAborts(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "non-interactive mode") {
 		t.Fatalf("stderr: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "These files will be overwritten") {
+		t.Fatalf("stderr missing overwrite warning: %q", stderr.String())
 	}
 }
 

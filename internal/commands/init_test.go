@@ -175,10 +175,10 @@ func createMethodologySource(t *testing.T) string {
 	root := t.TempDir()
 
 	writeFile(t, filepath.Join(root, "skills", "spec-auditor.md"), "# Spec\n")
-	writeFile(t, filepath.Join(root, "skills", "product-definition.md"), "# Product Definition\n")
+	writeFile(t, filepath.Join(root, "skills", "product-definition", "SKILL.md"), "# Product Definition\n")
 	writeFile(t, filepath.Join(root, "skills", "new-feature", "SKILL.md"), "# New Feature\n")
 	writeFile(t, filepath.Join(root, "skills", "grill-me", "SKILL.md"), "# Grill Me\n")
-	writeFile(t, filepath.Join(root, "skills", "architecture-definition.md"), "# Architecture Definition\n")
+	writeFile(t, filepath.Join(root, "skills", "architecture-definition", "SKILL.md"), "# Architecture Definition\n")
 	writeFile(t, filepath.Join(root, "agents", "SPIRE.md"), "# SPIRE\n")
 	writeFile(t, filepath.Join(root, "project_root", "local_agents.md"), "# Project\n")
 	writeFile(t, filepath.Join(root, "project_root", "opencode.json"), "{\n  \"instructions\": [\n    \".methodology/agents/SPIRE.md\",\n    \"AGENTS.md\"\n  ]\n}\n")
