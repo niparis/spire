@@ -1,5 +1,5 @@
 ---
-name: new-feature
+name: spire-new-feature
 description: Scaffold a new feature spec and change folder, then interview the user to author the spec. Use at Gate 0 when starting a new feature, or when the user says "new feature" / "start a feature".
 ---
 

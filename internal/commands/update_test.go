@@ -453,3 +453,138 @@ func TestRunUpdateIdempotent(t *testing.T) {
 		t.Fatalf("second update spuriously reported removals: %q", secondStdout.String())
 	}
 }
+
+func TestRunUpdateRemovesStaleMethodologyFile(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	stalePath := filepath.Join(projectRoot, ".methodology", "skills", "stale-file.md")
+	if err := os.WriteFile(stalePath, []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("write stale file: %v", err)
+	}
+
+	// Run in interactive mode so the "dirty" stale file does not block the update
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader("y\n"), true, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("stale methodology file was not removed")
+	}
+
+	if !strings.Contains(stdout.String(), "removed stale methodology:") {
+		t.Fatalf("missing stale removal notice: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "skills/stale-file.md") {
+		t.Fatalf("missing specific stale file in output: %q", stdout.String())
+	}
+}
+
+func TestRunUpdateRemovesEmptyMethodologyDirs(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	emptyDir := filepath.Join(projectRoot, ".methodology", "skills", "empty-skill")
+	staleFile := filepath.Join(emptyDir, "stale.md")
+	if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+		t.Fatalf("mkdir empty dir: %v", err)
+	}
+	if err := os.WriteFile(staleFile, []byte("stale\n"), 0o644); err != nil {
+		t.Fatalf("write stale file: %v", err)
+	}
+
+	// Run in interactive mode so the "dirty" stale file does not block the update
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader("y\n"), true, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	if _, err := os.Stat(staleFile); !os.IsNotExist(err) {
+		t.Fatalf("stale file was not removed")
+	}
+	if _, err := os.Stat(emptyDir); !os.IsNotExist(err) {
+		t.Fatalf("empty directory was not removed")
+	}
+}
+
+func TestRunUpdatePreservesSyncState(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	// Ensure sync state exists and is readable
+	syncStatePath := filepath.Join(projectRoot, ".methodology", ".spire-sync-state.json")
+	if _, err := os.Stat(syncStatePath); err != nil {
+		t.Fatalf("sync state missing after init: %v", err)
+	}
+
+	// Run update with no changes; sync state should survive
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	if _, err := os.Stat(syncStatePath); os.IsNotExist(err) {
+		t.Fatalf("sync state was incorrectly removed")
+	}
+}
+
+func TestRunUpdateSkillFrontmatterHasSpirePrefix(t *testing.T) {
+	projectRoot := t.TempDir()
+	source := createMethodologySource(t)
+	configureCanonicalSourceFromDir(t, source)
+
+	if code := RunInit(nil, projectRoot, &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("init failed with code %d", code)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := RunUpdate(nil, projectRoot, strings.NewReader(""), false, &stdout, &stderr)
+
+	if exitCode != 0 {
+		t.Fatalf("exit code: got %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	skills := []string{
+		"spire-product-definition",
+		"spire-new-feature",
+		"spire-grill-me",
+		"spire-architecture-definition",
+	}
+	for _, skill := range skills {
+		path := filepath.Join(projectRoot, ".opencode", "skills", skill, "SKILL.md")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		want := "name: " + skill
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("skill %s missing frontmatter %q; got %q", skill, want, string(data))
+		}
+	}
+}

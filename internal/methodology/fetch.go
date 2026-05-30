@@ -46,29 +46,29 @@ func SyncCanonicalToProject(projectRoot string) (string, SourceMetadata, error) 
 	return syncSourceToProject(meta, projectRoot)
 }
 
-func SyncAndReportChangesFromMetadata(localDir string, metadata SourceMetadata) ([]string, SourceMetadata, error) {
+func SyncAndReportChangesFromMetadata(localDir string, metadata SourceMetadata) ([]string, []string, SourceMetadata, error) {
 	meta, err := normalizeSourceMetadata(metadata)
 	if err != nil {
-		return nil, SourceMetadata{}, err
+		return nil, nil, SourceMetadata{}, err
 	}
 
 	sourceDir, cleanup, err := materializeSource(meta)
 	if err != nil {
-		return nil, SourceMetadata{}, err
+		return nil, nil, SourceMetadata{}, err
 	}
 	defer cleanup()
 
-	changedFiles, err := SyncAndReportChanges(localDir, sourceDir)
+	changedFiles, removedFiles, err := SyncAndReportChanges(localDir, sourceDir)
 	if err != nil {
-		return nil, SourceMetadata{}, err
+		return nil, nil, SourceMetadata{}, err
 	}
 
 	meta.FetchedAt = time.Now().UTC().Format(time.RFC3339)
 	if err := writeSourceMetadata(localDir, meta); err != nil {
-		return nil, SourceMetadata{}, err
+		return nil, nil, SourceMetadata{}, err
 	}
 
-	return changedFiles, meta, nil
+	return changedFiles, removedFiles, meta, nil
 }
 
 func ReadSourceMetadata(localDir string) (*SourceMetadata, error) {

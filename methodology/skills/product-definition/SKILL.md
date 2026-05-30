@@ -1,5 +1,5 @@
 ---
-name: product-definition
+name: spire-product-definition
 description: Use this skill in plan mode to create or update docs/specs/PRODUCT.md — the product north star.
 ---
 

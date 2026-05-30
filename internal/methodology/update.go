@@ -49,19 +49,42 @@ func DetectDirty(localDir string) ([]string, error) {
 	return dedupeSorted(dirty), nil
 }
 
-func SyncAndReportChanges(localDir string, sourceDir string) ([]string, error) {
+func SyncAndReportChanges(localDir string, sourceDir string) ([]string, []string, error) {
 	beforeHashes, err := dirFileHashes(localDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	sourceHashes, err := dirFileHashes(sourceDir)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	if err := copyDir(sourceDir, localDir); err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	var removed []string
+	for path := range beforeHashes {
+		if _, ok := sourceHashes[path]; !ok {
+			if path == syncStateFilename || path == sourceMetadataFilename {
+				continue
+			}
+			fullPath := filepath.Join(localDir, path)
+			if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+				return nil, nil, fmt.Errorf("remove stale file %q: %w", path, err)
+			}
+			removed = append(removed, path)
+		}
+	}
+
+	if err := removeEmptyDirs(localDir); err != nil {
+		return nil, nil, fmt.Errorf("remove empty directories: %w", err)
 	}
 
 	afterHashes, err := dirFileHashes(localDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var changed []string
@@ -74,25 +97,28 @@ func SyncAndReportChanges(localDir string, sourceDir string) ([]string, error) {
 
 	for path := range beforeHashes {
 		if _, ok := afterHashes[path]; !ok {
-			changed = append(changed, path)
+			if _, removed := sourceHashes[path]; !removed {
+				changed = append(changed, path)
+			}
 		}
 	}
 
 	existingProjections := map[string]string{}
 	state, err := readSyncState(localDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if state != nil {
 		existingProjections = state.Projections
 	}
 
 	if err := writeSyncState(localDir, &syncState{Hashes: afterHashes, Projections: existingProjections}); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	sort.Strings(changed)
-	return dedupeSorted(changed), nil
+	sort.Strings(removed)
+	return dedupeSorted(changed), dedupeSorted(removed), nil
 }
 
 func dirFileHashes(root string) (map[string]string, error) {
@@ -219,4 +245,34 @@ func WriteSyncStateProjections(localDir string, projections map[string]bool) err
 	}
 
 	return writeSyncState(localDir, state)
+}
+
+func removeEmptyDirs(root string) error {
+	var dirs []string
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && path != root {
+			dirs = append(dirs, path)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		if len(entries) == 0 {
+			if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove empty directory %q: %w", dir, err)
+			}
+		}
+	}
+	return nil
 }

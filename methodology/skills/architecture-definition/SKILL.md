@@ -1,5 +1,5 @@
 ---
-name: architecture-definition
+name: spire-architecture-definition
 description: Use this skill in plan mode to create or update docs/architecture/ARCHITECTURE.md and Architecture Decision Records.
 ---
 

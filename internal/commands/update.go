@@ -40,7 +40,7 @@ func RunUpdate(args []string, projectRoot string, stdin io.Reader, interactive b
 		return 1
 	}
 
-	if len(dirtyFiles) > 0 {
+	if len(dirtyFiles) > 0 && !options.forceProjectRoot {
 		fmt.Fprintln(stderr, "warning: local edits detected in .methodology (continuing will overwrite these files with upstream versions):")
 		for _, file := range dirtyFiles {
 			fmt.Fprintf(stderr, "- %s\n", file)
@@ -68,7 +68,7 @@ func RunUpdate(args []string, projectRoot string, stdin io.Reader, interactive b
 		source = *metadata
 	}
 
-	changedFiles, _, err := methodology.SyncAndReportChangesFromMetadata(methodologyPath, source)
+	changedFiles, removedFiles, _, err := methodology.SyncAndReportChangesFromMetadata(methodologyPath, source)
 	if err != nil {
 		fmt.Fprintf(stderr, "failed to update methodology payload: %v\n", err)
 		return 1
@@ -80,6 +80,12 @@ func RunUpdate(args []string, projectRoot string, stdin io.Reader, interactive b
 	} else {
 		fmt.Fprintln(stdout, "changed files:")
 		for _, file := range changedFiles {
+			fmt.Fprintf(stdout, "- %s\n", file)
+		}
+	}
+	if len(removedFiles) > 0 {
+		fmt.Fprintln(stdout, "removed stale methodology:")
+		for _, file := range removedFiles {
 			fmt.Fprintf(stdout, "- %s\n", file)
 		}
 	}
