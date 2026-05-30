@@ -41,18 +41,18 @@ func RunUpdate(args []string, projectRoot string, stdin io.Reader, interactive b
 	}
 
 	if len(dirtyFiles) > 0 {
-		fmt.Fprintln(stderr, "warning: local edits detected in .methodology:")
+		fmt.Fprintln(stderr, "warning: local edits detected in .methodology (continuing will overwrite these files with upstream versions):")
 		for _, file := range dirtyFiles {
 			fmt.Fprintf(stderr, "- %s\n", file)
 		}
 
 		if !interactive {
-			fmt.Fprintln(stderr, "non-interactive mode: stash or remove local edits first.")
+			fmt.Fprintln(stderr, "non-interactive mode: stash, remove, or back up local edits first. These files will be overwritten if you continue.")
 			return 1
 		}
 
 		if !confirmProceed(stdin, stderr) {
-			fmt.Fprintln(stderr, "stash or remove local edits first.")
+			fmt.Fprintln(stderr, "stash, remove, or back up local edits first. These files will be overwritten if you continue.")
 			return 1
 		}
 	}
