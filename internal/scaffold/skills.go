@@ -18,10 +18,10 @@ type SkillMapping struct {
 // under .opencode/skills/ with a spire- prefix. Auto-loaded skills
 // (implementation-loop, spec-auditor) are intentionally omitted.
 var HumanInvokedSkills = []SkillMapping{
-	{Source: "product-definition.md", Destination: ".opencode/skills/spire-product-definition/SKILL.md"},
+	{Source: "product-definition/SKILL.md", Destination: ".opencode/skills/spire-product-definition/SKILL.md"},
 	{Source: "new-feature/SKILL.md", Destination: ".opencode/skills/spire-new-feature/SKILL.md"},
 	{Source: "grill-me/SKILL.md", Destination: ".opencode/skills/spire-grill-me/SKILL.md"},
-	{Source: "architecture-definition.md", Destination: ".opencode/skills/spire-architecture-definition/SKILL.md"},
+	{Source: "architecture-definition/SKILL.md", Destination: ".opencode/skills/spire-architecture-definition/SKILL.md"},
 }
 
 // ApplySkillProjections copies each human-invoked skill from the methodology
