@@ -37,4 +37,4 @@ Current phase: READY FOR PR
 - None
 
 ## Next Action
-Open PR from branch `feat/002-update-sync-cleanup` to `main`
+PR opened: https://github.com/niparis/spire/pull/16
