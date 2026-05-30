@@ -47,10 +47,10 @@ func TestApplySkillProjections(t *testing.T) {
 	methodologyDir := t.TempDir()
 	projectRoot := t.TempDir()
 
-	writeSkillFile(t, filepath.Join(methodologyDir, "skills", "product-definition.md"), "# Product\n")
+	writeSkillFile(t, filepath.Join(methodologyDir, "skills", "product-definition", "SKILL.md"), "# Product\n")
 	writeSkillFile(t, filepath.Join(methodologyDir, "skills", "new-feature", "SKILL.md"), "# New Feature\n")
 	writeSkillFile(t, filepath.Join(methodologyDir, "skills", "grill-me", "SKILL.md"), "# Grill\n")
-	writeSkillFile(t, filepath.Join(methodologyDir, "skills", "architecture-definition.md"), "# Arch\n")
+	writeSkillFile(t, filepath.Join(methodologyDir, "skills", "architecture-definition", "SKILL.md"), "# Arch\n")
 
 	var out bytes.Buffer
 	if err := ApplySkillProjections(methodologyDir, projectRoot, &out); err != nil {
@@ -73,7 +73,7 @@ func TestApplySkillProjectionsSkipsMissingSkills(t *testing.T) {
 	methodologyDir := t.TempDir()
 	projectRoot := t.TempDir()
 
-	writeSkillFile(t, filepath.Join(methodologyDir, "skills", "product-definition.md"), "# Product\n")
+	writeSkillFile(t, filepath.Join(methodologyDir, "skills", "product-definition", "SKILL.md"), "# Product\n")
 
 	var out bytes.Buffer
 	if err := ApplySkillProjections(methodologyDir, projectRoot, &out); err != nil {
