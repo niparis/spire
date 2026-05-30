@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.3
+
+- Human-invoked skills (`product-definition`, `new-feature`, `grill-me`, `architecture-definition`) now use `spire-` prefixed `name:` in their YAML frontmatter for unambiguous OpenCode discovery.
+- `spire update` now removes stale files and empty directories from `.methodology/` that no longer exist in the upstream source tarball, keeping the synced directory an exact mirror.
+- `--force` flag now bypasses the dirty-check blocker for non-interactive updates.
+
 ## 1.0.2
 
 - Restructure `product-definition` and `architecture-definition` skills from flat files to `skill-name/SKILL.md` subfolders with YAML frontmatter, matching the convention used by other skills.
