@@ -2,9 +2,10 @@
 
 //! Adapter composition boundary.
 //!
-//! Live Linear, GitHub, filesystem, systemd, and harness adapters are deferred
-//! to later sprints. The SQLite adapter is the single-node durability boundary.
+//! Linear reads and SQLite are isolated infrastructure boundaries. Linear writes,
+//! GitHub, filesystem, systemd, and harness adapters remain deferred.
 
 pub struct AdapterBoundary;
 
+pub mod linear;
 pub mod sqlite;
