@@ -101,6 +101,19 @@ pub struct RunRecord<'a> {
     pub status: &'a str,
 }
 
+#[derive(Debug, Clone)]
+pub struct LinearObservation<'a> {
+    pub work_item_id: &'a str,
+    pub linear_issue_id: &'a str,
+    pub linear_identifier: &'a str,
+    pub team_id: &'a str,
+    pub workflow_state_id: &'a str,
+    pub revision: &'a str,
+    pub raw_estimate: Option<u8>,
+    pub complexity_class: Option<&'a str>,
+    pub eligibility_reason: Option<&'a str>,
+}
+
 impl SqliteDatabase {
     pub async fn initialize(
         path: impl Into<PathBuf>,
@@ -383,6 +396,36 @@ impl SqliteDatabase {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Observations only replace unclaimed work with an equal-or-newer canonical revision.
+    pub async fn upsert_linear_observation(
+        &self,
+        observation: LinearObservation<'_>,
+        now: i64,
+    ) -> Result<bool, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let result = sqlx::query(
+            "INSERT INTO work_items (id, linear_issue_id, linear_identifier, team_id, workflow_state_id, revision, raw_estimate, complexity_class, eligibility_reason, state, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'observed', ?, ?) \
+             ON CONFLICT(linear_issue_id) DO UPDATE SET \
+                linear_identifier = excluded.linear_identifier, team_id = excluded.team_id, workflow_state_id = excluded.workflow_state_id, revision = excluded.revision, raw_estimate = excluded.raw_estimate, complexity_class = excluded.complexity_class, eligibility_reason = excluded.eligibility_reason, updated_at = excluded.updated_at \
+             WHERE work_items.state NOT IN ('claiming', 'queued', 'implementing', 'waiting_for_ci', 'waiting_for_review') AND excluded.revision >= work_items.revision",
+        )
+        .bind(observation.work_item_id)
+        .bind(observation.linear_issue_id)
+        .bind(observation.linear_identifier)
+        .bind(observation.team_id)
+        .bind(observation.workflow_state_id)
+        .bind(observation.revision)
+        .bind(observation.raw_estimate.map(i64::from))
+        .bind(observation.complexity_class)
+        .bind(observation.eligibility_reason)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn claim_inbox(
@@ -1086,5 +1129,48 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn older_linear_observation_cannot_overwrite_newer_or_active_work() {
+        let database = database().await;
+        let newer = LinearObservation {
+            work_item_id: "work-1",
+            linear_issue_id: "linear-1",
+            linear_identifier: "SPI-1",
+            team_id: "team",
+            workflow_state_id: "ready",
+            revision: "2026-01-02:hash",
+            raw_estimate: Some(2),
+            complexity_class: Some("medium"),
+            eligibility_reason: None,
+        };
+        assert!(
+            database
+                .upsert_linear_observation(newer.clone(), 2)
+                .await
+                .unwrap()
+        );
+        let older = LinearObservation {
+            revision: "2026-01-01:hash",
+            raw_estimate: Some(1),
+            ..newer.clone()
+        };
+        assert!(!database.upsert_linear_observation(older, 3).await.unwrap());
+        let revision: String =
+            sqlx::query_scalar("SELECT revision FROM work_items WHERE id = 'work-1'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(revision, "2026-01-02:hash");
+        sqlx::query("UPDATE work_items SET state = 'implementing' WHERE id = 'work-1'")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let active = LinearObservation {
+            revision: "2026-01-03:hash",
+            ..newer
+        };
+        assert!(!database.upsert_linear_observation(active, 4).await.unwrap());
     }
 }
