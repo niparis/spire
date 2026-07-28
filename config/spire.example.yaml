@@ -1,0 +1,62 @@
+# Sprint 00 contract template. This is deliberately not an operational
+# configuration: every REPLACE_ME value must be replaced and validated by
+# `spire config validate` before automation is enabled.
+schema_version: 1
+
+linear:
+  organization_id: REPLACE_ME_LINEAR_ORGANIZATION_ID
+  team_id: REPLACE_ME_LINEAR_TEAM_ID
+  ready_state_id: REPLACE_ME_READY_FOR_AGENT_STATE_ID
+  in_progress_state_id: REPLACE_ME_IN_PROGRESS_STATE_ID
+  in_review_state_id: REPLACE_ME_IN_REVIEW_STATE_ID
+  specs_needed_state_id: REPLACE_ME_SPECS_NEEDED_STATE_ID
+  blocked_state_id: REPLACE_ME_BLOCKED_STATE_ID
+  done_state_id: REPLACE_ME_DONE_STATE_ID
+  canceled_state_id: REPLACE_ME_CANCELED_STATE_ID
+  bot_actor_id: REPLACE_ME_LINEAR_BOT_ACTOR_ID
+  credential_ref: systemd:credentials/linear-api-token
+  # Populate only with values returned by the configured team's estimate scale.
+  complexity_mapping: {}
+
+github:
+  repository: REPLACE_ME_OWNER/REPLACE_ME_REPOSITORY
+  base_branch: REPLACE_ME_BASE_BRANCH
+  required_checks: []
+  installation_id: REPLACE_ME_GITHUB_APP_INSTALLATION_ID
+  credential_ref: systemd:credentials/github-app-private-key
+
+cloudflare:
+  account_ref: REPLACE_ME_CLOUDFLARE_ACCOUNT_REFERENCE
+  zone_ref: REPLACE_ME_CLOUDFLARE_ZONE_REFERENCE
+  webhook_hostname: REPLACE_ME_WEBHOOK_HOSTNAME
+
+harnesses:
+  codex:
+    executable: codex
+    credential_ref: systemd:credentials/codex-auth
+    models: []
+    efforts: []
+  claude_code:
+    executable: claude
+    credential_ref: systemd:credentials/claude-auth
+    models: []
+    efforts: []
+
+dispatch:
+  policy_version: 1
+  # Empty rules are intentional until S00.2 records supported models and effort
+  # mappings. Production validation must reject this file.
+  rules: []
+
+concurrency:
+  total_active_harness_runs: 3
+  ai_initiated_active_harness_runs: 1
+  mutating_runs_per_repository: 1
+  active_runs_per_ticket: 1
+  cleanup_global: 1
+
+security:
+  admin_access: REPLACE_ME_LOOPBACK_OR_CLOUDFLARE_ACCESS
+  maker_push_mode: REPLACE_ME_DIRECT_OR_MECHANICAL_PUBLISHER
+  reviewer_can_push: false
+  credential_can_merge: false
