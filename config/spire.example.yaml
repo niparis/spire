@@ -60,3 +60,15 @@ security:
   maker_push_mode: REPLACE_ME_DIRECT_OR_MECHANICAL_PUBLISHER
   reviewer_can_push: false
   credential_can_merge: false
+
+runtime:
+  data_root: /var/lib/spire/data
+  backup_root: /var/lib/spire/backups
+  workspace_root: /var/lib/spire/workspaces
+  evidence_root: /var/lib/spire/evidence
+  implementation_timeout_seconds: 7200
+  review_timeout_seconds: 1800
+
+server:
+  api_bind: 127.0.0.1:8080
+  admin_bind: 127.0.0.1:8081
