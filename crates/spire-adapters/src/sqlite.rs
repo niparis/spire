@@ -5,7 +5,8 @@ use std::{
 };
 
 use sqlx::{
-    Row, SqlitePool,
+    Row, Sqlite, SqlitePool,
+    pool::PoolConnection,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use thiserror::Error;
@@ -13,7 +14,30 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const BUSY_TIMEOUT_MILLIS: u64 = 5_000;
+const MAX_WRITE_ATTEMPTS: u8 = 3;
 const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+async fn begin_immediate(connection: &mut PoolConnection<Sqlite>) -> Result<(), sqlx::Error> {
+    for attempt in 0..MAX_WRITE_ATTEMPTS {
+        match sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut **connection)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) if is_busy(&error) && attempt + 1 < MAX_WRITE_ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(10 * u64::from(attempt + 1))).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the final write-attempt returns")
+}
+
+fn is_busy(error: &sqlx::Error) -> bool {
+    error.as_database_error().is_some_and(|database| {
+        matches!(database.code().as_deref(), Some("5") | Some("SQLITE_BUSY"))
+    })
+}
 
 #[derive(Debug, Error)]
 pub enum SqliteAdapterError {
@@ -194,9 +218,7 @@ impl SqliteDatabase {
     ) -> Result<(), SqliteAdapterError> {
         let _write_gate = self.write_gate.lock().await;
         let mut connection = self.pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *connection)
-            .await?;
+        begin_immediate(&mut connection).await?;
         let result = async {
             sqlx::query(
                 "INSERT INTO work_items (id, state, revision, created_at, updated_at) \
@@ -256,9 +278,7 @@ impl SqliteDatabase {
     ) -> Result<Option<LeasedOutboxAction>, SqliteAdapterError> {
         let _write_gate = self.write_gate.lock().await;
         let mut connection = self.pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut *connection)
-            .await?;
+        begin_immediate(&mut connection).await?;
         let result = async {
             let claim = sqlx::query(
                 "UPDATE outbox SET status = 'leased', lease_owner = ?, lease_expires_at = ?, attempts = attempts + 1, updated_at = ? \
@@ -431,6 +451,53 @@ impl SqliteDatabase {
         Ok(result.rows_affected() == 1)
     }
 
+    pub async fn renew_outbox_lease(
+        &self,
+        id: &str,
+        owner: &str,
+        now: i64,
+        lease_until: i64,
+    ) -> Result<bool, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let result = sqlx::query(
+            "UPDATE outbox SET lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND status = 'leased' AND lease_owner = ? AND lease_expires_at >= ?",
+        )
+        .bind(lease_until)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn release_outbox_lease(
+        &self,
+        id: &str,
+        owner: &str,
+        next_attempt_at: i64,
+        error_class: &str,
+        error: &str,
+        now: i64,
+    ) -> Result<bool, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let result = sqlx::query(
+            "UPDATE outbox SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = ?, error_class = ?, last_error = ?, updated_at = ? \
+             WHERE id = ? AND status = 'leased' AND lease_owner = ?",
+        )
+        .bind(next_attempt_at)
+        .bind(error_class)
+        .bind(error)
+        .bind(now)
+        .bind(id)
+        .bind(owner)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     pub async fn release_run_lease(
         &self,
         run_id: &str,
@@ -445,6 +512,29 @@ impl SqliteDatabase {
         .bind(now)
         .bind(run_id)
         .bind(owner)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    pub async fn renew_run_lease(
+        &self,
+        run_id: &str,
+        owner: &str,
+        now: i64,
+        lease_until: i64,
+    ) -> Result<bool, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let result = sqlx::query(
+            "UPDATE runs SET lease_expires_at = ?, updated_at = ? \
+             WHERE id = ? AND status IN ('queued', 'starting', 'running', 'cancel_requested') \
+             AND lease_owner = ? AND lease_expires_at >= ?",
+        )
+        .bind(lease_until)
+        .bind(now)
+        .bind(run_id)
+        .bind(owner)
+        .bind(now)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -481,7 +571,8 @@ impl SqliteDatabase {
         let _write_gate = self.write_gate.lock().await;
         let result = sqlx::query(
             "UPDATE runs SET recovery_pending = 1, updated_at = ? \
-             WHERE status IN ('queued', 'starting', 'running', 'cancel_requested') AND lease_expires_at < ?",
+             WHERE status IN ('queued', 'starting', 'running', 'cancel_requested') \
+             AND lease_expires_at < ? AND recovery_pending = 0",
         )
         .bind(now)
         .bind(now)
@@ -816,10 +907,17 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(database.recover_expired_leases(11).await.unwrap(), 1);
         assert!(
             database
-                .claim_outbox("worker-2", 11, 20)
+                .renew_outbox_lease("outbox-1", "worker-1", 3, 12)
+                .await
+                .unwrap()
+        );
+        assert_eq!(database.recover_expired_leases(11).await.unwrap(), 0);
+        assert_eq!(database.recover_expired_leases(13).await.unwrap(), 1);
+        assert!(
+            database
+                .claim_outbox("worker-2", 13, 20)
                 .await
                 .unwrap()
                 .is_some()
@@ -830,6 +928,26 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+        assert!(
+            database
+                .release_outbox_lease(
+                    "outbox-1",
+                    "worker-2",
+                    21,
+                    "transient",
+                    "destination unavailable",
+                    14,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            database
+                .claim_outbox("worker-1", 21, 30)
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 
@@ -908,8 +1026,18 @@ mod tests {
                 .await
                 .unwrap()
         );
+        assert!(
+            database
+                .renew_run_lease("run-1", "worker-1", 3, 12)
+                .await
+                .unwrap()
+        );
         assert_eq!(
             database.mark_expired_runs_for_recovery(11).await.unwrap(),
+            0
+        );
+        assert_eq!(
+            database.mark_expired_runs_for_recovery(13).await.unwrap(),
             1
         );
         let state: (String, i64) =
@@ -920,13 +1048,13 @@ mod tests {
         assert_eq!(state, ("running".to_owned(), 1));
         assert!(
             database
-                .acquire_run_lease("run-1", "worker-2", 11, 20)
+                .acquire_run_lease("run-1", "worker-2", 13, 20)
                 .await
                 .unwrap()
         );
         assert!(
             database
-                .release_run_lease("run-1", "worker-2", 12)
+                .release_run_lease("run-1", "worker-2", 14)
                 .await
                 .unwrap()
         );
