@@ -1,5 +1,6 @@
 use std::time::SystemTime;
 
+use crate::CanonicalLinearIssue;
 use spire_domain::{
     CommitSha, LinearIssueId, ProviderCapacity, RepositoryName, RunId, WorkItemId, WorkspaceId,
 };
@@ -25,6 +26,7 @@ pub struct CanonicalIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelevantIssueQuery {
+    pub team_id: String,
     pub cursor: Option<String>,
     pub workflow_state_ids: Vec<String>,
 }
@@ -69,6 +71,29 @@ pub trait LinearPort {
         &self,
         team_id: &str,
     ) -> Result<ExternalResult<WorkflowConfiguration>, Self::Error>;
+}
+
+/// Read-only Linear boundary used by reconciliation. Mutation methods remain on
+/// `LinearPort` for the later, explicitly authorized automation sprint.
+#[allow(async_fn_in_trait)]
+pub trait LinearReadPort {
+    type Error;
+
+    async fn get_canonical_issue(
+        &self,
+        issue_id: &LinearIssueId,
+    ) -> Result<ExternalResult<CanonicalLinearIssue>, Self::Error>;
+
+    async fn find_canonical_issues(
+        &self,
+        query: &RelevantIssueQuery,
+    ) -> Result<ExternalResult<CanonicalIssuePage>, Self::Error>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalIssuePage {
+    pub issues: Vec<CanonicalLinearIssue>,
+    pub next_cursor: Option<String>,
 }
 
 pub trait GitHubPort {
