@@ -17,6 +17,8 @@ linear:
   credential_ref: systemd:credentials/linear-api-token
   # Populate only with values returned by the configured team's estimate scale.
   complexity_mapping: {}
+  supported_type_labels: []
+  repository_mappings: []
 
 github:
   repository: REPLACE_ME_OWNER/REPLACE_ME_REPOSITORY

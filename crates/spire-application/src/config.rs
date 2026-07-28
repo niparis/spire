@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fs, net::SocketAddr, path::PathBuf};
 
+use crate::RepositoryMapping;
 use serde::Deserialize;
 use spire_domain::{
     ComplexityClass, ComplexityEstimate, DispatchCandidate, DispatchPolicy, DispatchPolicyError,
@@ -38,6 +39,8 @@ pub struct LinearConfig {
     pub bot_actor_id: String,
     pub credential_ref: String,
     pub complexity_mapping: BTreeMap<ComplexityEstimate, ComplexityClass>,
+    pub supported_type_labels: Vec<String>,
+    pub repository_mappings: Vec<RepositoryMapping>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -249,6 +252,16 @@ impl Config {
                 path: "linear.complexity_mapping".to_owned(),
             });
         }
+        if self.linear.supported_type_labels.is_empty() {
+            return Err(ConfigError::MissingValue {
+                path: "linear.supported_type_labels".to_owned(),
+            });
+        }
+        if self.linear.repository_mappings.is_empty() {
+            return Err(ConfigError::MissingValue {
+                path: "linear.repository_mappings".to_owned(),
+            });
+        }
         for (path, value) in [
             (
                 "concurrency.total_active_harness_runs",
@@ -447,6 +460,8 @@ linear:
   bot_actor_id: bot
   credential_ref: env:LINEAR_TOKEN
   complexity_mapping: {1: small, 2: medium, 3: large, 5: xlarge}
+  supported_type_labels: [type:bug]
+  repository_mappings: [{label: repo:spire, repository: owner/spire, enabled: true}]
 github:
   repository: owner/repository
   base_branch: main

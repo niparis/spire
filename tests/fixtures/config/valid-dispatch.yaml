@@ -14,6 +14,11 @@ linear:
   bot_actor_id: bot
   credential_ref: env:LINEAR_TOKEN
   complexity_mapping: {1: small, 2: medium, 3: large, 5: xlarge}
+  supported_type_labels: [type:bug, type:feature, type:refactor, type:chore]
+  repository_mappings:
+    - label: repo:spire
+      repository: owner/spire
+      enabled: true
 github:
   repository: owner/repository
   base_branch: main
