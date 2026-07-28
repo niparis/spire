@@ -111,6 +111,8 @@ pub struct SecurityConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
+    pub database_path: PathBuf,
+    pub database_max_connections: u32,
     pub data_root: PathBuf,
     pub backup_root: PathBuf,
     pub workspace_root: PathBuf,
@@ -291,6 +293,11 @@ impl Config {
             return Err(ConfigError::CredentialCanMerge);
         }
         validate_runtime_paths(&self.runtime)?;
+        if self.runtime.database_max_connections == 0 {
+            return Err(ConfigError::MustBePositive {
+                path: "runtime.database_max_connections".to_owned(),
+            });
+        }
         if !self.server.admin_bind.ip().is_loopback() {
             return Err(ConfigError::AdminMustBeLoopback);
         }
@@ -379,6 +386,7 @@ fn ensure_credential_reference(path: &str, reference: &str) -> Result<(), Config
 
 fn validate_runtime_paths(runtime: &RuntimeConfig) -> Result<(), ConfigError> {
     let paths = [
+        ("runtime.database_path", &runtime.database_path),
         ("runtime.data_root", &runtime.data_root),
         ("runtime.backup_root", &runtime.backup_root),
         ("runtime.workspace_root", &runtime.workspace_root),
@@ -464,7 +472,7 @@ dispatch:
         - {harness: codex, model: codex-model, effort: medium}
 concurrency: {total_active_harness_runs: 3, ai_initiated_active_harness_runs: 1, mutating_runs_per_repository: 1, active_runs_per_ticket: 1, cleanup_global: 1}
 security: {admin_access: loopback, maker_push_mode: mechanical_publisher, reviewer_can_push: false, credential_can_merge: false}
-runtime: {data_root: /var/lib/spire/data, backup_root: /var/lib/spire/backups, workspace_root: /var/lib/spire/workspaces, evidence_root: /var/lib/spire/evidence, implementation_timeout_seconds: 7200, review_timeout_seconds: 1800}
+runtime: {database_path: /var/lib/spire/data/spire.db, database_max_connections: 4, data_root: /var/lib/spire/data, backup_root: /var/lib/spire/backups, workspace_root: /var/lib/spire/workspaces, evidence_root: /var/lib/spire/evidence, implementation_timeout_seconds: 7200, review_timeout_seconds: 1800}
 server: {api_bind: 127.0.0.1:8080, admin_bind: 127.0.0.1:8081}
 "#;
 
