@@ -12,6 +12,7 @@ use axum::{
     routing::get,
 };
 use clap::{Parser, Subcommand};
+use spire_adapters::sqlite::SqliteDatabase;
 use spire_application::{Config, ValidatedConfig};
 use spire_domain::{ComplexityClass, HarnessId, RunRole};
 use tokio::net::TcpListener;
@@ -35,6 +36,10 @@ enum Command {
         #[command(subcommand)]
         command: DispatchCommand,
     },
+    Db {
+        #[command(subcommand)]
+        command: DbCommand,
+    },
     Serve {
         #[arg(long)]
         config: PathBuf,
@@ -56,6 +61,20 @@ enum DispatchCommand {
         config: PathBuf,
         #[arg(long)]
         maker_harness: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DbCommand {
+    Backup {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+    },
+    Check {
+        #[arg(long)]
+        database: PathBuf,
     },
 }
 
@@ -85,6 +104,26 @@ async fn main() -> Result<()> {
                     maker_harness,
                 },
         } => dispatch_dry_run(load_config(config)?, maker_harness)?,
+        Command::Db {
+            command:
+                DbCommand::Backup {
+                    database,
+                    destination,
+                },
+        } => {
+            let database = SqliteDatabase::initialize(database, 4).await?;
+            database.backup_to(destination).await?;
+            println!("database backup completed");
+        }
+        Command::Db {
+            command: DbCommand::Check { database },
+        } => {
+            SqliteDatabase::initialize(database, 4)
+                .await?
+                .check_integrity()
+                .await?;
+            println!("database integrity check passed");
+        }
         Command::Serve { config } => serve(load_config(config)?).await?,
     }
     Ok(())
