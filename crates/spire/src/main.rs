@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -12,9 +15,15 @@ use axum::{
     routing::get,
 };
 use clap::{Parser, Subcommand};
-use spire_adapters::sqlite::SqliteDatabase;
-use spire_application::{Config, ValidatedConfig};
-use spire_domain::{ComplexityClass, HarnessId, RunRole};
+use spire_adapters::{
+    linear::LinearReadAdapter,
+    sqlite::{LinearObservation, SqliteDatabase},
+};
+use spire_application::{
+    CanonicalLinearIssue, Config, EligibilityInput, ExternalResult, LinearReadPort,
+    RelevantIssueQuery, ValidatedConfig, dispatch_is_covered, evaluate_eligibility,
+};
+use spire_domain::{ComplexityClass, HarnessId, LinearIssueId, RunRole};
 use tokio::net::TcpListener;
 use tracing::info;
 use uuid::Uuid;
@@ -39,6 +48,10 @@ enum Command {
     Db {
         #[command(subcommand)]
         command: DbCommand,
+    },
+    Linear {
+        #[command(subcommand)]
+        command: LinearCommand,
     },
     Serve {
         #[arg(long)]
@@ -75,6 +88,26 @@ enum DbCommand {
     Check {
         #[arg(long)]
         database: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LinearCommand {
+    Get {
+        #[arg(long)]
+        config: PathBuf,
+        issue: String,
+    },
+    Reconcile {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Explain {
+        #[arg(long)]
+        config: PathBuf,
+        issue: String,
     },
 }
 
@@ -124,8 +157,147 @@ async fn main() -> Result<()> {
                 .await?;
             println!("database integrity check passed");
         }
+        Command::Linear {
+            command: LinearCommand::Get { config, issue },
+        } => {
+            let config = load_config(config)?;
+            let issue = LinearIssueId::new(issue).context("invalid Linear issue ID")?;
+            let adapter = linear_adapter(&config)?;
+            match adapter.get_canonical_issue(&issue).await? {
+                ExternalResult::Confirmed(issue) => print_json(&issue)?,
+                ExternalResult::NotFound => anyhow::bail!("Linear issue was not found"),
+                ExternalResult::Ambiguous { detail } => {
+                    anyhow::bail!("ambiguous Linear response: {detail}")
+                }
+            }
+        }
+        Command::Linear {
+            command: LinearCommand::Explain { config, issue },
+        } => {
+            let config = load_config(config)?;
+            let issue_id = LinearIssueId::new(issue).context("invalid Linear issue ID")?;
+            let adapter = linear_adapter(&config)?;
+            match adapter.get_canonical_issue(&issue_id).await? {
+                ExternalResult::Confirmed(issue) => print_json(&explain_issue(&config, &issue))?,
+                ExternalResult::NotFound => anyhow::bail!("Linear issue was not found"),
+                ExternalResult::Ambiguous { detail } => {
+                    anyhow::bail!("ambiguous Linear response: {detail}")
+                }
+            }
+        }
+        Command::Linear {
+            command: LinearCommand::Reconcile { config, dry_run },
+        } => {
+            if !dry_run {
+                anyhow::bail!("Linear reconciliation is read-only in Sprint 03; pass --dry-run");
+            }
+            linear_reconcile(load_config(config)?).await?;
+        }
         Command::Serve { config } => serve(load_config(config)?).await?,
     }
+    Ok(())
+}
+
+fn linear_adapter(config: &ValidatedConfig) -> Result<LinearReadAdapter> {
+    LinearReadAdapter::from_credential_reference(&config.config.linear.credential_ref)
+        .context("failed to construct read-only Linear adapter")
+}
+
+fn explain_issue(config: &ValidatedConfig, issue: &CanonicalLinearIssue) -> serde_json::Value {
+    let supported_types = config
+        .config
+        .linear
+        .supported_type_labels
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let complexity_mapping = config
+        .config
+        .linear
+        .complexity_mapping
+        .iter()
+        .map(|(estimate, class)| (estimate.value(), *class))
+        .collect::<BTreeMap<_, _>>();
+    let eligibility = evaluate_eligibility(EligibilityInput {
+        issue,
+        ready_state_id: &config.config.linear.ready_state_id,
+        supported_type_labels: &supported_types,
+        repository_mappings: &config.config.linear.repository_mappings,
+        complexity_mapping: &complexity_mapping,
+        incomplete_blockers: &BTreeSet::new(),
+        locally_active: false,
+        locally_terminal: false,
+        dispatch_covers_implementation_and_review: issue
+            .estimate
+            .and_then(|value| complexity_mapping.get(&value).copied())
+            .is_some_and(|class| dispatch_is_covered(&config.policy, &config.capabilities, class)),
+    });
+    serde_json::json!({"issue": issue, "eligibility": eligibility, "linear_writes_enabled": false})
+}
+
+async fn linear_reconcile(config: ValidatedConfig) -> Result<()> {
+    let adapter = linear_adapter(&config)?;
+    let database = SqliteDatabase::initialize(
+        &config.config.runtime.database_path,
+        config.config.runtime.database_max_connections,
+    )
+    .await?;
+    let mut cursor = None;
+    let mut reports = Vec::new();
+    loop {
+        let page = match adapter
+            .find_canonical_issues(&RelevantIssueQuery {
+                team_id: config.config.linear.team_id.clone(),
+                cursor: cursor.clone(),
+                workflow_state_ids: vec![config.config.linear.ready_state_id.clone()],
+            })
+            .await?
+        {
+            ExternalResult::Confirmed(page) => page,
+            ExternalResult::NotFound => break,
+            ExternalResult::Ambiguous { detail } => {
+                anyhow::bail!("ambiguous Linear response: {detail}")
+            }
+        };
+        for issue in page.issues {
+            let report = explain_issue(&config, &issue);
+            let eligibility = report.get("eligibility").cloned().unwrap_or_default();
+            let complexity = eligibility
+                .get("complexity")
+                .and_then(serde_json::Value::as_str);
+            let reason = eligibility
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let work_item_id = format!("linear:{}", issue.id);
+            database
+                .upsert_linear_observation(
+                    LinearObservation {
+                        work_item_id: &work_item_id,
+                        linear_issue_id: issue.id.as_str(),
+                        linear_identifier: &issue.identifier,
+                        team_id: &issue.team_id,
+                        workflow_state_id: &issue.workflow_state_id,
+                        revision: &issue.revision,
+                        raw_estimate: issue.estimate,
+                        complexity_class: complexity,
+                        eligibility_reason: reason.as_deref(),
+                    },
+                    0,
+                )
+                .await?;
+            reports.push(report);
+        }
+        let Some(next) = page.next_cursor else { break };
+        cursor = Some(next);
+    }
+    print_json(
+        &serde_json::json!({"dry_run": true, "linear_writes_enabled": false, "reports": reports, "health": adapter.health()}),
+    )
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
 
