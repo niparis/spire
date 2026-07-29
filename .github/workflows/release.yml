@@ -28,6 +28,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Restore Cargo downloads and build artifacts
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-v1-${{ runner.os }}-${{ env.TARGET_TRIPLE }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-v1-${{ runner.os }}-${{ env.TARGET_TRIPLE }}-
+
       - name: Verify the triggering tag
         env:
           RELEASE_TAG: ${{ github.ref_name }}
