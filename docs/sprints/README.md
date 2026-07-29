@@ -48,6 +48,7 @@ flowchart LR
     S6 --> S7["Sprint 07<br/>GitHub and CI"]
     S7 --> S8["Sprint 08<br/>Independent review"]
     S8 --> S9["Sprint 09<br/>Operations and pilot"]
+    S9 --> S11["Sprint 11<br/>Release artifacts and installation"]
 ```
 
 | Sprint | Outcome | Production writes enabled? |
@@ -62,6 +63,7 @@ flowchart LR
 | [07 — GitHub and CI](07-github-and-ci.md) | PR/SHA/required-check truth and bounded CI correction | Linear + GitHub |
 | [08 — Independent review](08-independent-review.md) | Different-harness maker/checker loop | Linear + GitHub |
 | [09 — Operations and pilot](09-operations-and-pilot.md) | Deployable, observable, recoverable pilot | Pilot repositories |
+| [11 — Release artifacts, versioning, and installation](11-release-artifacts-versioning-and-installation.md) | Reproducible binary artifacts and documented installation | This repository only |
 
 ## Shared Definition of Done
 
@@ -93,6 +95,8 @@ Every sprint must satisfy all applicable items:
 | Webhook inbox/outbox | Sprint 02 | Sprints 06–08 | At-least-once and idempotent |
 | GitHub canonical facts | Sprint 07 | Sprint 08 | Bind all gates to head SHA |
 | Deployment and recovery runbook | Sprint 09 | Operators | Drill after material changes |
+| Versioned binary archive and checksum manifest | Sprint 11 | Operators and installers | Exact tag, target, and checksum identify the bytes |
+| Root README installation contract | Sprint 11 | Operators and contributors | Commands name a release asset, never a transient Actions run |
 
 ## Change-control rules
 
@@ -104,6 +108,8 @@ Every sprint must satisfy all applicable items:
 - Do not enable external writes early merely to make a demo easier.
 - Each sprint should be delivered as small reviewable pull requests using the
   suggested slices in its document.
+- Sprint 10 is intentionally unallocated in the current roadmap. Sprint 11 is a
+  follow-on release-engineering sprint and must not be renumbered to fill that gap.
 
 ## Evidence Sources
 
@@ -120,4 +126,3 @@ Every sprint must satisfy all applicable items:
 - Exact Linear estimate scale, model IDs, effort mappings, credentials, repository
   list, and provider reset signals remain Sprint 00 inputs.
 - File paths in the sprint documents are target paths, not existing source files.
-
