@@ -10,6 +10,7 @@ use serde_json::Value;
 pub enum OutboxKind {
     LinearTransition,
     LinearComment,
+    GithubReviewSummary,
     OperatorNotification,
 }
 
@@ -18,6 +19,7 @@ impl OutboxKind {
         match self {
             Self::LinearTransition => "linear_transition",
             Self::LinearComment => "linear_comment",
+            Self::GithubReviewSummary => "github_review_summary",
             Self::OperatorNotification => "operator_notification",
         }
     }
@@ -26,6 +28,7 @@ impl OutboxKind {
         [
             Self::LinearTransition,
             Self::LinearComment,
+            Self::GithubReviewSummary,
             Self::OperatorNotification,
         ]
         .into_iter()

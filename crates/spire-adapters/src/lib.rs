@@ -6,6 +6,7 @@
 
 pub struct AdapterBoundary;
 
+pub mod cleanup;
 pub mod github;
 pub mod harness;
 pub mod linear;

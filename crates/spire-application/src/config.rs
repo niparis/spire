@@ -21,6 +21,7 @@ pub struct Config {
     pub concurrency: ConcurrencyConfig,
     pub security: SecurityConfig,
     pub runtime: RuntimeConfig,
+    pub operations: OperationsConfig,
     pub server: ServerConfig,
     pub webhook: WebhookConfig,
     pub rollout: RolloutConfig,
@@ -147,6 +148,17 @@ pub struct RuntimeConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct OperationsConfig {
+    pub minimum_free_disk_bytes: u64,
+    pub minimum_free_inodes: u64,
+    pub workspace_terminal_retention_seconds: u64,
+    pub evidence_terminal_retention_seconds: u64,
+    pub backup_retention_count: u16,
+    pub backup_interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub api_bind: SocketAddr,
     pub admin_bind: SocketAddr,
@@ -226,7 +238,7 @@ pub enum ConfigError {
 /// The only configuration schema this build accepts. Sprint 06 added the signed
 /// ingress and restricted-rollout sections, so a Sprint 05 file must be edited
 /// rather than silently reinterpreted.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 const MAX_WEBHOOK_BODY_BYTES: usize = 1_048_576;
 const MAX_REPLAY_WINDOW_SECONDS: u64 = 600;
 
@@ -474,6 +486,7 @@ impl Config {
             return Err(ConfigError::CredentialCanMerge);
         }
         validate_runtime_paths(&self.runtime)?;
+        validate_operations(&self.operations)?;
         if self.runtime.database_max_connections == 0 {
             return Err(ConfigError::MustBePositive {
                 path: "runtime.database_max_connections".to_owned(),
@@ -704,12 +717,50 @@ fn validate_runtime_paths(runtime: &RuntimeConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn validate_operations(operations: &OperationsConfig) -> Result<(), ConfigError> {
+    for (path, value) in [
+        (
+            "operations.minimum_free_disk_bytes",
+            operations.minimum_free_disk_bytes,
+        ),
+        (
+            "operations.minimum_free_inodes",
+            operations.minimum_free_inodes,
+        ),
+        (
+            "operations.workspace_terminal_retention_seconds",
+            operations.workspace_terminal_retention_seconds,
+        ),
+        (
+            "operations.evidence_terminal_retention_seconds",
+            operations.evidence_terminal_retention_seconds,
+        ),
+        (
+            "operations.backup_interval_seconds",
+            operations.backup_interval_seconds,
+        ),
+    ] {
+        if value == 0 {
+            return Err(ConfigError::MustBePositive {
+                path: path.to_owned(),
+            });
+        }
+    }
+    if operations.backup_retention_count < 2 {
+        return Err(ConfigError::OutOfRange {
+            path: "operations.backup_retention_count".to_owned(),
+            detail: "must retain at least two dated backups".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const VALID_CONFIG: &str = r#"
-schema_version: 2
+schema_version: 3
 linear:
   organization_id: org
   team_id: team
@@ -752,6 +803,7 @@ dispatch:
 concurrency: {total_active_harness_runs: 3, ai_initiated_active_harness_runs: 1, mutating_runs_per_repository: 1, active_runs_per_ticket: 1, cleanup_global: 1}
 security: {admin_access: loopback, maker_push_mode: mechanical_publisher, reviewer_can_push: false, credential_can_merge: false}
 runtime: {database_path: /var/lib/spire/data/spire.db, database_max_connections: 4, data_root: /var/lib/spire/data, backup_root: /var/lib/spire/backups, workspace_root: /var/lib/spire/workspaces, evidence_root: /var/lib/spire/evidence, implementation_timeout_seconds: 7200, review_timeout_seconds: 1800}
+operations: {minimum_free_disk_bytes: 10737418240, minimum_free_inodes: 10000, workspace_terminal_retention_seconds: 604800, evidence_terminal_retention_seconds: 604800, backup_retention_count: 7, backup_interval_seconds: 86400}
 server: {api_bind: 127.0.0.1:8080, admin_bind: 127.0.0.1:8081}
 webhook: {path: /webhooks/linear, signing_secret_ref: systemd:credentials/linear-webhook-secret, webhook_id: webhook, replay_window_seconds: 60, max_body_bytes: 262144}
 rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositories: [], allowed_type_labels: [], max_active_harness_runs: 1}
@@ -781,13 +833,13 @@ rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositori
 
     #[test]
     fn rejects_unknown_keys_and_empty_policy() {
-        assert!(Config::from_yaml("schema_version: 2\nunknown: value").is_err());
+        assert!(Config::from_yaml("schema_version: 3\nunknown: value").is_err());
         let invalid = VALID_CONFIG.replace("policy_version: 1", "policy_version: 0");
         assert!(matches!(
             Config::from_yaml(&invalid).unwrap().validate(),
             Err(ConfigError::Domain { .. })
         ));
-        let invalid = VALID_CONFIG.replace("schema_version: 2", "schema_version: 1");
+        let invalid = VALID_CONFIG.replace("schema_version: 3", "schema_version: 2");
         assert!(matches!(
             Config::from_yaml(&invalid).unwrap().validate(),
             Err(ConfigError::UnsupportedSchemaVersion)
@@ -845,6 +897,28 @@ rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositori
                     Config::from_yaml(&invalid).unwrap().validate(),
                     Err(ConfigError::RolloutInconsistent { .. })
                 ),
+                "{to} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn operational_thresholds_and_backup_retention_fail_closed() {
+        for (from, to) in [
+            (
+                "minimum_free_disk_bytes: 10737418240",
+                "minimum_free_disk_bytes: 0",
+            ),
+            ("minimum_free_inodes: 10000", "minimum_free_inodes: 0"),
+            ("backup_retention_count: 7", "backup_retention_count: 1"),
+            (
+                "backup_interval_seconds: 86400",
+                "backup_interval_seconds: 0",
+            ),
+        ] {
+            let invalid = VALID_CONFIG.replace(from, to);
+            assert!(
+                Config::from_yaml(&invalid).unwrap().validate().is_err(),
                 "{to} must be rejected"
             );
         }

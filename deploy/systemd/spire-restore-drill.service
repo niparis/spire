@@ -1,0 +1,22 @@
+[Unit]
+Description=Spire SQLite restore integrity drill
+After=spire-backup.service
+Requires=spire.service
+
+[Service]
+Type=oneshot
+User=spire
+Group=spire
+UMask=0077
+ExecStart=/usr/local/bin/spire db restore-latest --config /etc/spire/spire.yaml
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/spire

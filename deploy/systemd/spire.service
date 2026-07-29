@@ -2,22 +2,43 @@
 Description=Spire orchestrator
 After=network-online.target
 Wants=network-online.target
+ConditionPathExists=/etc/spire/spire.yaml
 
 [Service]
 Type=simple
 User=spire
 Group=spire
 WorkingDirectory=/srv/spire
+UMask=0077
+ExecStartPre=/usr/local/bin/spire config validate --config /etc/spire/spire.yaml
 ExecStart=/usr/local/bin/spire serve --config /etc/spire/spire.yaml
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=120
+KillSignal=SIGINT
 LoadCredential=linear-api-token:/etc/spire/credentials/linear-api-token
 LoadCredential=linear-webhook-secret:/etc/spire/credentials/linear-webhook-secret
+LoadCredential=github-app-private-key:/etc/spire/credentials/github-app-private-key
+LoadCredential=github-webhook-secret:/etc/spire/credentials/github-webhook-secret
+LoadCredential=codex-auth:/etc/spire/credentials/codex-auth
+LoadCredential=claude-auth:/etc/spire/credentials/claude-auth
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/spire
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+StateDirectory=spire
+RuntimeDirectory=spire
+ReadWritePaths=/var/lib/spire /run/spire
 
 [Install]
 WantedBy=multi-user.target

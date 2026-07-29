@@ -54,6 +54,39 @@ pub fn should_open_circuit(outcome: RunOutcome) -> bool {
     )
 }
 
+/// A review is a distinct provider invocation: it receives no session reference
+/// and is constrained to a read-only checkout. The actual process runner must
+/// use this specification instead of a maker specification for review roles.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOnlyReviewSpec {
+    pub unit: TransientUnitSpec,
+    pub permission_mode: &'static str,
+    pub provider_session_reference: Option<String>,
+}
+
+pub fn read_only_review_unit(
+    run_id: &str,
+    worktree: &str,
+    evidence_path: &str,
+    timeout_seconds: u64,
+) -> Result<ReadOnlyReviewSpec, HarnessError> {
+    Ok(ReadOnlyReviewSpec {
+        unit: transient_unit(run_id, worktree, evidence_path, timeout_seconds)?,
+        permission_mode: "read_only",
+        provider_session_reference: None,
+    })
+}
+
+/// The caller snapshots tracked-file status before and after invoking the
+/// reviewer. Any change is a contract breach, including an attempted approval.
+pub fn review_worktree_is_unchanged(before: &str, after: &str) -> Result<(), HarnessError> {
+    if before == after {
+        Ok(())
+    } else {
+        Err(HarnessError::InvalidContract)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +96,13 @@ mod tests {
         let result = parse_jsonl_result("noise\n{\"schema_version\":1,\"outcome\":\"quota_exhausted\",\"session_id\":null,\"evidence_reference\":\"evidence/run.jsonl\"}").unwrap();
         assert_eq!(result.outcome, RunOutcome::QuotaExhausted);
         assert!(should_open_circuit(result.outcome));
+    }
+
+    #[test]
+    fn review_spec_has_no_maker_session_or_write_authority() {
+        let review = read_only_review_unit("review-1", "/worktree", "/evidence", 60).unwrap();
+        assert_eq!(review.permission_mode, "read_only");
+        assert_eq!(review.provider_session_reference, None);
+        assert!(review_worktree_is_unchanged("", "M src/lib.rs").is_err());
     }
 }

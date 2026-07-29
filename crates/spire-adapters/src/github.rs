@@ -312,7 +312,7 @@ impl GitHubPort for GitHubHttpAdapter {
         number: u64,
         idempotency_key: &IdempotencyKey,
         body: &str,
-    ) -> Result<ExternalResult<()>, Self::Error> {
+    ) -> Result<ExternalResult<spire_application::PublishedComment>, Self::Error> {
         self.check_repository(repository)?;
         let path = format!("/repos/{repository}/issues/{number}/comments");
         let response = self
@@ -321,17 +321,26 @@ impl GitHubPort for GitHubHttpAdapter {
             .json(&serde_json::json!({"body": body}))
             .send()
             .await?;
-        Ok(if self.response(response).await?.is_some() {
-            ExternalResult::Confirmed(())
-        } else {
-            ExternalResult::NotFound
-        })
+        let Some(response) = self.response(response).await? else {
+            return Ok(ExternalResult::NotFound);
+        };
+        let comment = response.json::<CommentResponse>().await?;
+        Ok(ExternalResult::Confirmed(
+            spire_application::PublishedComment {
+                external_id: comment.id.to_string(),
+                already_present: false,
+            },
+        ))
     }
 }
 
 #[derive(Deserialize)]
 struct CheckRunsResponse {
     check_runs: Vec<CheckRunResponse>,
+}
+#[derive(Deserialize)]
+struct CommentResponse {
+    id: u64,
 }
 #[derive(Deserialize)]
 struct CheckRunResponse {
