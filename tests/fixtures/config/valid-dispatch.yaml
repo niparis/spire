@@ -1,0 +1,78 @@
+# Synthetic configuration for offline parser and CLI tests. It is not a
+# deployment configuration and its provider model IDs are intentionally fake.
+schema_version: 1
+linear:
+  organization_id: org
+  team_id: team
+  ready_state_id: ready
+  in_progress_state_id: progress
+  in_review_state_id: review
+  specs_needed_state_id: specs
+  blocked_state_id: blocked
+  done_state_id: done
+  canceled_state_id: canceled
+  bot_actor_id: bot
+  credential_ref: env:LINEAR_TOKEN
+  complexity_mapping: {1: small, 2: medium, 3: large, 5: xlarge}
+  supported_type_labels: [type:bug, type:feature, type:refactor, type:chore]
+  repository_mappings:
+    - label: repo:spire
+      repository: owner/spire
+      enabled: true
+github:
+  repository: owner/repository
+  base_branch: main
+  required_checks: [test]
+  installation_id: installation
+  credential_ref: systemd:credentials/github-key
+cloudflare:
+  account_ref: account
+  zone_ref: zone
+  webhook_hostname: spire.example.test
+harnesses:
+  codex:
+    executable: codex
+    credential_ref: env:CODEX_TOKEN
+    models: [codex-model]
+    efforts: [medium]
+  claude-code:
+    executable: claude
+    credential_ref: env:CLAUDE_TOKEN
+    models: [claude-model]
+    efforts: [medium]
+dispatch:
+  policy_version: 1
+  rules:
+    - id: implementation
+      when: {role: implementation, complexity: [small, medium, large, xlarge]}
+      candidates:
+        - {harness: codex, model: codex-model, effort: medium}
+        - {harness: claude-code, model: claude-model, effort: medium}
+    - id: review
+      when: {role: review, complexity: [small, medium, large, xlarge]}
+      candidates:
+        - {harness: claude-code, model: claude-model, effort: medium}
+        - {harness: codex, model: codex-model, effort: medium}
+concurrency:
+  total_active_harness_runs: 3
+  ai_initiated_active_harness_runs: 1
+  mutating_runs_per_repository: 1
+  active_runs_per_ticket: 1
+  cleanup_global: 1
+security:
+  admin_access: loopback
+  maker_push_mode: mechanical_publisher
+  reviewer_can_push: false
+  credential_can_merge: false
+runtime:
+  database_path: /var/lib/spire/data/spire.db
+  database_max_connections: 4
+  data_root: /var/lib/spire/data
+  backup_root: /var/lib/spire/backups
+  workspace_root: /var/lib/spire/workspaces
+  evidence_root: /var/lib/spire/evidence
+  implementation_timeout_seconds: 7200
+  review_timeout_seconds: 1800
+server:
+  api_bind: 127.0.0.1:8080
+  admin_bind: 127.0.0.1:8081

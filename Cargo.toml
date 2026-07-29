@@ -1,0 +1,33 @@
+[workspace]
+members = [
+  "crates/spire-domain",
+  "crates/spire-application",
+  "crates/spire-adapters",
+  "crates/spire",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0.98"
+axum = "0.8.4"
+clap = { version = "4.5.41", features = ["derive"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+serde_yaml = "0.9.34"
+sha2 = "0.10.9"
+hex = "0.4.3"
+lineark-sdk = "=3.0.3"
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite"] }
+thiserror = "2.0.12"
+tokio = { version = "1.47.1", features = ["fs", "macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tower = { version = "0.5.2", features = ["util"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+uuid = { version = "1.17.0", features = ["serde", "v4"] }

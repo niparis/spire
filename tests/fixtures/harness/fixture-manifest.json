@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "codex-success",
+      "harness": "codex",
+      "capture_state": "required",
+      "normalized_outcome": "pr_ready",
+      "required_fields": ["terminal_event", "exit_status", "session_id", "structured_output"],
+      "redaction_confirmed": false
+    },
+    {
+      "id": "claude-success",
+      "harness": "claude_code",
+      "capture_state": "blocked",
+      "normalized_outcome": "runner_unhealthy",
+      "required_fields": ["terminal_event", "exit_status", "session_id", "structured_output"],
+      "redaction_confirmed": false
+    }
+  ]
+}
