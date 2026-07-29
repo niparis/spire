@@ -16,8 +16,8 @@ webhook, ticket, or GitHub repository is mutated.
 
 - User-scoped paths and service execution survive logout/reboot.
 - Configuration no longer requires harness credential references.
-- The GitHub identity decision—GitHub App or scoped bot token—is approved in
-  `security-and-authority.md`.
+- The GitHub identity is a GitHub App, recorded in
+  [`../decisions/github-app-identity.md`](../decisions/github-app-identity.md).
 - Captured, redacted CLI fixtures define supported Codex and Claude Code
   authentication-status behavior.
 
@@ -126,14 +126,17 @@ Verification:
 
 Implementation:
 
-1. Implement only the GitHub identity approved at sprint entry.
+1. Implement the GitHub App identity only. Authority, permissions, stored parts,
+   and rotation behavior are defined in
+   [`../decisions/github-app-identity.md`](../decisions/github-app-identity.md);
+   do not restate them here.
 2. Separate GitHub API authentication from Git transport/SSH authentication.
-3. Verify viewer/app installation identity and required API permissions without
-   mutating a repository.
-4. If using a GitHub App, own installation-token minting and refresh inside the
-   adapter; do not store a short-lived installation token as the durable secret.
-5. If using a scoped bot token, validate scope and expiry evidence available from
-   the API and headers.
+3. Verify app installation identity and granted permissions without mutating a
+   repository.
+4. Own installation-token minting and refresh inside the adapter; the private key
+   is the durable secret and a short-lived installation token is never stored.
+5. Register the App through the manifest flow; the operator never authors the
+   private key or webhook secret by hand.
 6. Report merge capability as an unsafe configuration; branch protection remains
    an independent enforcement boundary.
 
@@ -261,11 +264,14 @@ actionable results without any provider mutation.
 ## Evidence Sources
 
 - [`../decisions/first-run-onboarding-and-project-mapping.md`](../decisions/first-run-onboarding-and-project-mapping.md)
+- [`../decisions/github-app-identity.md`](../decisions/github-app-identity.md)
 - [`../decisions/security-and-authority.md`](../decisions/security-and-authority.md)
 - Sprint 00 provider fixtures and the target-VM runtime-user evidence.
 
 ## Unknown / Unverified
 
-- GitHub App versus scoped bot token until the entry decision is approved.
+- Whether the merge endpoint requires `contents: write`, and whether an App
+  review satisfies a required approving review.
+- Whether GitHub accepts a loopback `redirect_url` in the App manifest flow.
 - Stable Codex and Claude Code authentication-status command contracts.
 - A portable non-mutating proof of Git push authority.
