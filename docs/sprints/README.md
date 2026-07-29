@@ -1,8 +1,10 @@
 # AI Harness Orchestrator Sprint Plan
 
-**Last Verified:** 2026-07-28  
-**Status:** Implementation-ready plan; no application code exists yet  
-**Source of truth:** [`../ai_harness_implementation.md`](../ai_harness_implementation.md)
+**Last Verified:** 2026-07-29
+**Status:** Active implementation roadmap; application code exists and sprint exit
+criteria remain the evidence boundary
+**Sources of truth:** [`../ai_harness_implementation.md`](../ai_harness_implementation.md)
+and accepted decision records
 
 ## Purpose
 
@@ -14,7 +16,9 @@ criteria are demonstrated.
 The target is one Rust orchestrator on an always-on homelab VM, backed by SQLite,
 with Cloudflare Tunnel ingress. Linear supplies readiness, repository context, and a
 complexity estimate. Versioned dispatch rules select `(harness, model, effort)`.
-Codex or Claude Code implements; a fresh different harness reviews after CI.
+Codex or Claude Code implements; a fresh different harness reviews after CI. A
+released binary is initialized under the operator's login user, discovers provider
+metadata, and persists Linear-project-to-repository authority in SQLite.
 
 ## Non-negotiable invariants
 
@@ -33,6 +37,10 @@ Codex or Claude Code implements; a fresh different harness reviews after CI.
 - Capacity failures never consume engineering correction rounds.
 - Harness credentials cannot merge.
 - External writes are delivered from an outbox and are idempotent.
+- Enabled SQLite project mappings are the repository-routing authority; ticket
+  content cannot expand it.
+- Default onboarding reuses the login user's provider-native Codex, Claude Code,
+  Git, and SSH authentication.
 - No work in this plan requires reading or migrating `LEGACY/`.
 
 ## Sprint sequence
@@ -49,6 +57,10 @@ flowchart LR
     S7 --> S8["Sprint 08<br/>Independent review"]
     S8 --> S9["Sprint 09<br/>Operations and pilot"]
     S9 --> S11["Sprint 11<br/>Release artifacts and installation"]
+    S11 --> S12["Sprint 12<br/>User runtime and config"]
+    S12 --> S13["Sprint 13<br/>Auth and diagnostics"]
+    S13 --> S14["Sprint 14<br/>Durable project routing"]
+    S14 --> S15["Sprint 15<br/>Guided onboarding"]
 ```
 
 | Sprint | Outcome | Production writes enabled? |
@@ -64,6 +76,10 @@ flowchart LR
 | [08 — Independent review](08-independent-review.md) | Different-harness maker/checker loop | Linear + GitHub |
 | [09 — Operations and pilot](09-operations-and-pilot.md) | Deployable, observable, recoverable pilot | Pilot repositories |
 | [11 — Release artifacts, versioning, and installation](11-release-artifacts-versioning-and-installation.md) | Reproducible binary artifacts and documented installation | This repository only |
+| [12 — User runtime and configuration](12-user-runtime-and-configuration.md) | Login-user service, XDG paths, and maker/reviewer execution configuration | No |
+| [13 — Authentication and diagnostics](13-authentication-and-diagnostics.md) | Managed service auth and provider-native harness/Git/SSH diagnosis | Authentication only |
+| [14 — Durable project routing](14-durable-project-routing.md) | SQLite-backed Linear-project-to-repository routing and allowlisting | No |
+| [15 — Guided onboarding and project provisioning](15-guided-onboarding-and-project-provisioning.md) | Resumable `spire init`/`spire new` and controlled Linear project creation | Linear setup only |
 
 ## Shared Definition of Done
 
@@ -97,6 +113,11 @@ Every sprint must satisfy all applicable items:
 | Deployment and recovery runbook | Sprint 09 | Operators | Drill after material changes |
 | Versioned binary archive and checksum manifest | Sprint 11 | Operators and installers | Exact tag, target, and checksum identify the bytes |
 | Root README installation contract | Sprint 11 | Operators and contributors | Commands name a release asset, never a transient Actions run |
+| Installation profile and path resolver | Sprint 12 | Every CLI command | One precedence implementation; user/system profiles never mix implicitly |
+| Maker/reviewer role configuration | Sprint 12 | Dispatch compilation | Provider, model, and effort compile into a versioned complete policy |
+| Secret store and diagnostic contracts | Sprint 13 | Init and operations | No raw secret or provider auth object crosses into core DTOs |
+| Project-repository mapping schema | Sprint 14 | Eligibility and admission | Forward-only, revisioned, audited, and snapshotted by claimed work |
+| Resumable onboarding/provisioning state | Sprint 15 | Operators | Confirmed effects are never repeated after restart |
 
 ## Change-control rules
 
@@ -110,19 +131,23 @@ Every sprint must satisfy all applicable items:
   suggested slices in its document.
 - Sprint 10 is intentionally unallocated in the current roadmap. Sprint 11 is a
   follow-on release-engineering sprint and must not be renumbered to fill that gap.
+- Sprints 12–15 implement the accepted onboarding direction; preserve their
+  work-package IDs when refining scope.
 
 ## Evidence Sources
 
 - [`../ai_harness_architecture.md`](../ai_harness_architecture.md)
 - [`../ai_harness_implementation.md`](../ai_harness_implementation.md)
-- User decisions recorded in those documents on 2026-07-28.
-- No implementation code or live deployed service was available when this plan was
-  written.
+- [`../decisions/first-run-onboarding-and-project-mapping.md`](../decisions/first-run-onboarding-and-project-mapping.md)
+- User decisions recorded in those documents on 2026-07-28 and 2026-07-29.
+- Application source, migrations, deployment units, and operator runbooks were
+  inspected when Sprints 12–15 were added.
 - Nothing inside `LEGACY/` was read.
 
 ## Unknown / Unverified
 
 - Sprint duration and staffing are intentionally unspecified.
-- Exact Linear estimate scale, model IDs, effort mappings, credentials, repository
-  list, and provider reset signals remain Sprint 00 inputs.
-- File paths in the sprint documents are target paths, not existing source files.
+- Exact installed model IDs, effort mappings, credentials, Linear workspace
+  metadata, and repositories remain installation-specific discovery inputs.
+- User-systemd distribution support and the Linear project-create contract require
+  target-VM/workspace evidence in Sprints 12 and 15.

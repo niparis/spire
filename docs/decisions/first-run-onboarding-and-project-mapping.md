@@ -281,8 +281,11 @@ and webhooks.
   required fallback behavior agree.
 - Replace label-based `repository_mappings` configuration with a forward SQLite
   migration and application ports for project mapping.
-- Add implementation-ready onboarding sprints for `spire init`, `spire auth`,
-  `spire new`, `spire doctor`, and durable project mappings.
+- Implement the onboarding roadmap in Sprints 12–15:
+  [`12-user-runtime-and-configuration.md`](../sprints/12-user-runtime-and-configuration.md),
+  [`13-authentication-and-diagnostics.md`](../sprints/13-authentication-and-diagnostics.md),
+  [`14-durable-project-routing.md`](../sprints/14-durable-project-routing.md), and
+  [`15-guided-onboarding-and-project-provisioning.md`](../sprints/15-guided-onboarding-and-project-provisioning.md).
 - Add deterministic Linear project create/list fixtures, including timeout after
   remote creation and ambiguous retry.
 - Verify the exact Linear `ProjectCreateInput` schema and required permissions

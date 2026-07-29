@@ -2,7 +2,8 @@
 
 **Last Verified:** 2026-07-29  
 **Depends on:** Sprint 09 exit criteria  
-**Unlocks:** Repeatable operator installation and upgrade of the Spire binary
+**Unlocks:** Sprint 12 and repeatable operator installation/upgrade of the Spire
+binary
 
 ## Outcome
 
