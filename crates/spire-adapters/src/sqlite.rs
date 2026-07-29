@@ -5,9 +5,14 @@ use std::{
 };
 
 use spire_application::{
-    CanonicalPullRequest, CapacityCounts, CapacityLimits, CheckRun, OperationsSnapshot,
+    CanonicalPullRequest, CapacityCounts, CapacityLimits, CheckRun, NewProjectRepositoryMapping,
+    OperationsSnapshot, ProjectMappingPort, ProjectRepositoryMapping, ProjectRoutingDecision,
     PullRequestState, RequiredCheckGate, ReviewResult, ReviewVerdict, SchedulerInitiator,
     capacity_allows,
+};
+use spire_domain::{
+    LinearProjectId, ProjectMappingRevision, ProjectMappingStatus, ProjectRepositoryMappingId,
+    RepositoryName,
 };
 use sqlx::{
     Row, Sqlite, SqlitePool,
@@ -123,6 +128,8 @@ pub enum SqliteAdapterError {
     ReviewContract(String),
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    #[error("project mapping data is invalid: {0}")]
+    ProjectMappingContract(String),
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +296,56 @@ pub enum ReviewWaiverPersistence {
 pub enum ReviewPublicationPersistence {
     Applied,
     StaleHead,
+}
+
+fn project_mapping_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ProjectRepositoryMapping, SqliteAdapterError> {
+    let status = match row.try_get::<String, _>("status")?.as_str() {
+        "enabled" => ProjectMappingStatus::Enabled,
+        "disabled" => ProjectMappingStatus::Disabled,
+        "removed" => ProjectMappingStatus::Removed,
+        value => {
+            return Err(SqliteAdapterError::ProjectMappingContract(format!(
+                "unknown mapping status {value}"
+            )));
+        }
+    };
+    Ok(ProjectRepositoryMapping {
+        id: ProjectRepositoryMappingId::parse(&row.try_get::<String, _>("id")?)
+            .map_err(|error| SqliteAdapterError::ProjectMappingContract(error.to_string()))?,
+        linear_organization_id: row.try_get("linear_organization_id")?,
+        linear_team_id: row.try_get("linear_team_id")?,
+        linear_project_id: LinearProjectId::new(row.try_get::<String, _>("linear_project_id")?)
+            .map_err(|error| SqliteAdapterError::ProjectMappingContract(error.to_string()))?,
+        linear_project_name_snapshot: row.try_get("linear_project_name_snapshot")?,
+        github_repository: RepositoryName::new(row.try_get::<String, _>("github_repository")?)
+            .map_err(|error| SqliteAdapterError::ProjectMappingContract(error.to_string()))?,
+        repository_source_path: row.try_get("repository_source_path")?,
+        git_common_directory: row.try_get("git_common_directory")?,
+        git_remote_url: row.try_get("git_remote_url")?,
+        default_branch: row.try_get("default_branch")?,
+        status,
+        revision: ProjectMappingRevision::new(row.try_get::<i64, _>("revision")? as u64)
+            .map_err(|error| SqliteAdapterError::ProjectMappingContract(error.to_string()))?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn mapping_status_name(status: ProjectMappingStatus) -> &'static str {
+    match status {
+        ProjectMappingStatus::Enabled => "enabled",
+        ProjectMappingStatus::Disabled => "disabled",
+        ProjectMappingStatus::Removed => "removed",
+    }
+}
+
+fn mapping_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 impl SqliteDatabase {
@@ -1301,6 +1358,230 @@ impl SqliteDatabase {
     }
 }
 
+#[allow(async_fn_in_trait)]
+impl ProjectMappingPort for SqliteDatabase {
+    type Error = SqliteAdapterError;
+
+    async fn resolve(
+        &self,
+        linear_organization_id: &str,
+        linear_project_id: &LinearProjectId,
+    ) -> Result<ProjectRoutingDecision, Self::Error> {
+        let rows = sqlx::query(
+            "SELECT * FROM project_repository_mappings WHERE linear_organization_id = ? AND linear_project_id = ?",
+        )
+        .bind(linear_organization_id)
+        .bind(linear_project_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        let mappings = rows
+            .iter()
+            .map(project_mapping_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(spire_application::resolve_project_routing(
+            &mappings,
+            spire_application::MappingRepositoryHealth::Healthy,
+        ))
+    }
+
+    async fn list(&self) -> Result<Vec<ProjectRepositoryMapping>, Self::Error> {
+        sqlx::query(
+            "SELECT * FROM project_repository_mappings ORDER BY linear_organization_id, linear_project_id",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(project_mapping_from_row)
+        .collect()
+    }
+
+    async fn create(
+        &self,
+        mapping: NewProjectRepositoryMapping,
+        actor: &str,
+        reason: Option<&str>,
+    ) -> Result<ProjectRepositoryMapping, Self::Error> {
+        let now = mapping_now();
+        let mapping = ProjectRepositoryMapping {
+            id: ProjectRepositoryMappingId::new(),
+            linear_organization_id: mapping.linear_organization_id,
+            linear_team_id: mapping.linear_team_id,
+            linear_project_id: mapping.linear_project_id,
+            linear_project_name_snapshot: mapping.linear_project_name_snapshot,
+            github_repository: mapping.github_repository,
+            repository_source_path: mapping.repository_source_path,
+            git_common_directory: mapping.git_common_directory,
+            git_remote_url: mapping.git_remote_url,
+            default_branch: mapping.default_branch,
+            status: ProjectMappingStatus::Enabled,
+            revision: ProjectMappingRevision::new(1).expect("a literal mapping revision is valid"),
+            created_at: now,
+            updated_at: now,
+        };
+        self.persist_project_mapping(mapping, None, actor, "created", reason)
+            .await
+    }
+
+    async fn revise(
+        &self,
+        mapping: ProjectRepositoryMapping,
+        expected_revision: ProjectMappingRevision,
+        actor: &str,
+        reason: &str,
+    ) -> Result<ProjectRepositoryMapping, Self::Error> {
+        self.persist_project_mapping(
+            mapping,
+            Some(expected_revision),
+            actor,
+            "revised",
+            Some(reason),
+        )
+        .await
+    }
+
+    async fn disable(
+        &self,
+        id: ProjectRepositoryMappingId,
+        expected_revision: ProjectMappingRevision,
+        actor: &str,
+        reason: &str,
+    ) -> Result<ProjectRepositoryMapping, Self::Error> {
+        self.change_project_mapping_status(
+            id,
+            expected_revision,
+            ProjectMappingStatus::Disabled,
+            actor,
+            "disabled",
+            reason,
+        )
+        .await
+    }
+
+    async fn tombstone(
+        &self,
+        id: ProjectRepositoryMappingId,
+        expected_revision: ProjectMappingRevision,
+        actor: &str,
+        reason: &str,
+    ) -> Result<ProjectRepositoryMapping, Self::Error> {
+        self.change_project_mapping_status(
+            id,
+            expected_revision,
+            ProjectMappingStatus::Removed,
+            actor,
+            "removed",
+            reason,
+        )
+        .await
+    }
+}
+
+impl SqliteDatabase {
+    async fn change_project_mapping_status(
+        &self,
+        id: ProjectRepositoryMappingId,
+        expected_revision: ProjectMappingRevision,
+        status: ProjectMappingStatus,
+        actor: &str,
+        operation: &str,
+        reason: &str,
+    ) -> Result<ProjectRepositoryMapping, SqliteAdapterError> {
+        let row = sqlx::query("SELECT * FROM project_repository_mappings WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+        let mut mapping = project_mapping_from_row(&row)?;
+        mapping.status = status;
+        self.persist_project_mapping(
+            mapping,
+            Some(expected_revision),
+            actor,
+            operation,
+            Some(reason),
+        )
+        .await
+    }
+
+    async fn persist_project_mapping(
+        &self,
+        mut mapping: ProjectRepositoryMapping,
+        expected_revision: Option<ProjectMappingRevision>,
+        actor: &str,
+        operation: &str,
+        reason: Option<&str>,
+    ) -> Result<ProjectRepositoryMapping, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let result = async {
+            let previous_revision = expected_revision.map(ProjectMappingRevision::value);
+            if let Some(revision) = expected_revision {
+                mapping.revision = revision.next();
+                mapping.updated_at = mapping_now();
+                let updated = sqlx::query(
+                    "UPDATE project_repository_mappings SET linear_team_id = ?, linear_project_name_snapshot = ?, github_repository = ?, repository_source_path = ?, git_common_directory = ?, git_remote_url = ?, default_branch = ?, status = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?",
+                )
+                .bind(&mapping.linear_team_id)
+                .bind(&mapping.linear_project_name_snapshot)
+                .bind(mapping.github_repository.as_str())
+                .bind(&mapping.repository_source_path)
+                .bind(&mapping.git_common_directory)
+                .bind(&mapping.git_remote_url)
+                .bind(&mapping.default_branch)
+                .bind(mapping_status_name(mapping.status))
+                .bind(mapping.revision.value() as i64)
+                .bind(mapping.updated_at)
+                .bind(mapping.id.to_string())
+                .bind(revision.value() as i64)
+                .execute(&mut *connection)
+                .await?;
+                if updated.rows_affected() != 1 {
+                    return Err(sqlx::Error::RowNotFound);
+                }
+            } else {
+                sqlx::query(
+                    "INSERT INTO project_repository_mappings (id, linear_organization_id, linear_team_id, linear_project_id, linear_project_name_snapshot, github_repository, repository_source_path, git_common_directory, git_remote_url, default_branch, status, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(mapping.id.to_string())
+                .bind(&mapping.linear_organization_id)
+                .bind(&mapping.linear_team_id)
+                .bind(mapping.linear_project_id.as_str())
+                .bind(&mapping.linear_project_name_snapshot)
+                .bind(mapping.github_repository.as_str())
+                .bind(&mapping.repository_source_path)
+                .bind(&mapping.git_common_directory)
+                .bind(&mapping.git_remote_url)
+                .bind(&mapping.default_branch)
+                .bind(mapping_status_name(mapping.status))
+                .bind(mapping.revision.value() as i64)
+                .bind(mapping.created_at)
+                .bind(mapping.updated_at)
+                .execute(&mut *connection)
+                .await?;
+            }
+            let snapshot = serde_json::to_string(&mapping)
+                .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+            sqlx::query(
+                "INSERT INTO project_repository_mapping_history (mapping_id, actor, operation, previous_revision, new_revision, reason, mapping_snapshot_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(mapping.id.to_string())
+            .bind(actor)
+            .bind(operation)
+            .bind(previous_revision.map(|value| value as i64))
+            .bind(mapping.revision.value() as i64)
+            .bind(reason)
+            .bind(snapshot)
+            .bind(mapping.updated_at)
+            .execute(&mut *connection)
+            .await?;
+            Ok::<ProjectRepositoryMapping, sqlx::Error>(mapping)
+        }
+        .await;
+        commit_result(&mut connection, result).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2173,5 +2454,62 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state, "waiting_for_review");
+    }
+
+    #[tokio::test]
+    async fn project_mappings_are_revisioned_auditable_and_fail_closed() {
+        let database = database().await;
+        let mapping = database
+            .create(
+                NewProjectRepositoryMapping {
+                    linear_organization_id: "organization".into(),
+                    linear_team_id: "team".into(),
+                    linear_project_id: LinearProjectId::new("project").unwrap(),
+                    linear_project_name_snapshot: "Project".into(),
+                    github_repository: RepositoryName::new("owner/repository").unwrap(),
+                    repository_source_path: "/repositories/source".into(),
+                    git_common_directory: "/repositories/source/.git".into(),
+                    git_remote_url: "git@github.com:owner/repository.git".into(),
+                    default_branch: "main".into(),
+                },
+                "operator",
+                Some("initial mapping"),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            database
+                .resolve("organization", &LinearProjectId::new("project").unwrap())
+                .await
+                .unwrap(),
+            ProjectRoutingDecision::Mapped { .. }
+        ));
+
+        let disabled = database
+            .disable(mapping.id, mapping.revision, "operator", "maintenance")
+            .await
+            .unwrap();
+        assert_eq!(disabled.revision, ProjectMappingRevision::new(2).unwrap());
+        assert_eq!(
+            database
+                .resolve("organization", &LinearProjectId::new("project").unwrap())
+                .await
+                .unwrap(),
+            ProjectRoutingDecision::MappingDisabled
+        );
+        assert!(
+            database
+                .disable(mapping.id, mapping.revision, "operator", "stale update")
+                .await
+                .is_err()
+        );
+        let history: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM project_repository_mapping_history WHERE mapping_id = ?",
+        )
+        .bind(mapping.id.to_string())
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(history, 2);
     }
 }
