@@ -93,16 +93,19 @@ Implementation:
 2. Check out the exact workflow SHA and run the canonical workspace gates:
    `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and
    `cargo test --workspace`.
-3. Build the distributable binary with
+3. Cache Cargo registry/Git downloads and `target/` artifacts by runner OS, target
+   triple, lockfile, and Rust toolchain. Restore a compatible source-only fallback;
+   never cache credentials or release outputs.
+4. Build the distributable binary with
    `cargo build --locked --release --package spire --target x86_64-unknown-linux-musl`
    for the confirmed initial target.
-4. Package only the `spire` executable, `LICENSE`, and a generated
+5. Package only the `spire` executable, `LICENSE`, and a generated
    `VERSION` file into a deterministic `tar.gz` archive named
    `spire-v<version>-x86_64-unknown-linux-musl.tar.gz`.
-5. Generate a SHA-256 manifest named `SHA256SUMS` beside the archive.
-6. Upload the archive, manifest, and build metadata as one Actions artifact named
+6. Generate a SHA-256 manifest named `SHA256SUMS` beside the archive.
+7. Upload the archive, manifest, and build metadata as one Actions artifact named
    `spire-v<version>-x86_64-unknown-linux-musl`.
-7. Set artifact retention explicitly and document its value; do not rely on the
+8. Set artifact retention explicitly and document its value; do not rely on the
    repository default.
 
 Verification:
@@ -152,8 +155,13 @@ Create `README.md` as a concise operator-facing entry point. It must contain:
    (`x86_64-unknown-linux-musl`); configuration and provider credentials remain
    operator-owned.
 4. Source verification commands and the canonical CI gates.
-5. A version-pinned, checksum-verified installation example using the GitHub Release
-   asset, not an Actions artifact URL:
+5. A version-pinned shell-installer command that fetches `install.sh` from the same
+   immutable Git tag, downloads only the corresponding GitHub Release asset, and
+   verifies its SHA-256 checksum before installation. The installer requires an
+   explicit version, supports `SPIRE_BIN_DIR`, and fails clearly for an unsupported
+   platform.
+6. A version-pinned, checksum-verified manual installation example using the GitHub
+   Release asset, not an Actions artifact URL:
 
 ```sh
 version=v0.1.0 # replace with the chosen release tag
@@ -168,9 +176,9 @@ install -m 0755 spire "$HOME/.local/bin/spire"
 spire --version
 ```
 
-6. A note that `latest` URLs are intentionally not used in the primary command, so
+7. A note that `latest` URLs are intentionally not used in the primary command, so
    installations are reproducible and a human controls upgrades.
-7. Upgrade, rollback, and service-restart links to the Sprint 09 runbook. Do not
+8. Upgrade, rollback, and service-restart links to the Sprint 09 runbook. Do not
    place real credentials, tokens, or production configuration in the README.
 
 Verification:

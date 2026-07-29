@@ -25,6 +25,24 @@ Install `curl`, `tar`, `sha256sum`, and `install` before downloading a release. 
 Use an explicit version rather than a moving `latest` URL so that installation and
 rollback always identify the exact bytes being used.
 
+For a Poetry/Oh My Zsh-style installer, fetch the installer script from the same
+immutable release tag as the binary. It verifies the downloaded release checksum
+before installing to `~/.local/bin`:
+
+```sh
+version=v0.1.0 # replace with the chosen release tag
+curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+  "https://raw.githubusercontent.com/niparis/spire/${version}/install.sh" \
+  | sh -s -- --version "${version}"
+```
+
+Set `SPIRE_BIN_DIR` before running the command to choose another installation
+directory. Use `--dry-run` after the tag to display the exact asset URLs without
+making changes.
+
+For environments where executing a downloaded script is not acceptable, install the
+same release manually:
+
 ```sh
 version=v0.1.0 # replace with the chosen release tag
 base_url="https://github.com/niparis/spire/releases/download/${version}"
