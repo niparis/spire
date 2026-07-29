@@ -282,6 +282,8 @@ mod tests {
             identifier: "SPI-1".into(),
             team_id: "team".into(),
             workflow_state_id: state.into(),
+            project_id: None,
+            project_name_snapshot: None,
             estimate: Some(2),
             priority: Some(1),
             labels: ["type:chore".into(), "repo:spire".into()]

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use spire_domain::{ComplexityClass, LinearIssueId, RepositoryName, RunRole};
+use spire_domain::{ComplexityClass, LinearIssueId, LinearProjectId, RepositoryName, RunRole};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanonicalLinearIssue {
@@ -10,6 +10,8 @@ pub struct CanonicalLinearIssue {
     pub identifier: String,
     pub team_id: String,
     pub workflow_state_id: String,
+    pub project_id: Option<LinearProjectId>,
+    pub project_name_snapshot: Option<String>,
     pub estimate: Option<u8>,
     pub priority: Option<u8>,
     pub labels: BTreeSet<String>,
@@ -24,8 +26,20 @@ pub struct CanonicalLinearIssue {
 }
 
 impl CanonicalLinearIssue {
-    pub fn revision(updated_at: &str, content: &str) -> String {
-        let digest = Sha256::digest(content.as_bytes());
+    pub fn revision(
+        updated_at: &str,
+        content: &str,
+        project_id: Option<&LinearProjectId>,
+        project_name_snapshot: Option<&str>,
+    ) -> String {
+        let digest = Sha256::digest(
+            format!(
+                "{content}\u{1f}{}\u{1f}{}",
+                project_id.map(LinearProjectId::as_str).unwrap_or(""),
+                project_name_snapshot.unwrap_or("")
+            )
+            .as_bytes(),
+        );
         format!("{updated_at}:{}", hex::encode(digest))
     }
 }
@@ -222,6 +236,8 @@ mod tests {
             identifier: "SPI-1".into(),
             team_id: "team".into(),
             workflow_state_id: "ready".into(),
+            project_id: Some(LinearProjectId::new("project-1").unwrap()),
+            project_name_snapshot: Some("Project".into()),
             estimate: Some(2),
             priority: None,
             labels: ["type:bug".into(), "repo:spire".into()]
@@ -234,7 +250,12 @@ mod tests {
             creator_id: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-02T00:00:00Z".into(),
-            revision: CanonicalLinearIssue::revision("2026-01-02T00:00:00Z", "untrusted"),
+            revision: CanonicalLinearIssue::revision(
+                "2026-01-02T00:00:00Z",
+                "untrusted",
+                Some(&LinearProjectId::new("project-1").unwrap()),
+                Some("Project"),
+            ),
         }
     }
 
