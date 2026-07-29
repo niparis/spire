@@ -28,11 +28,13 @@ use sha2::Sha256;
 use spire_adapters::{
     github::{GitHubHttpAdapter, GitHubReconciler},
     linear::{LinearReadAdapter, load_credential},
+    secrets::UserSecretStore,
     sqlite::{InboxEvent, LinearObservation, SqliteDatabase},
 };
 use spire_application::{
-    CanonicalLinearIssue, Config, EligibilityInput, ExternalResult, LinearReadPort,
-    RelevantIssueQuery, ValidatedConfig, WebhookAllowlist, WebhookRequest, accept_delivery,
+    AuthenticationState, CanonicalLinearIssue, Config, DiagnosticFinding, DiagnosticReport,
+    EligibilityInput, ExternalResult, LinearReadPort, ManagedSecret, RelevantIssueQuery,
+    SecretStorePort, ValidatedConfig, WebhookAllowlist, WebhookRequest, accept_delivery,
     dispatch_is_covered, evaluate_eligibility,
 };
 use spire_domain::{ComplexityClass, HarnessId, LinearIssueId, RunRole};
@@ -74,6 +76,14 @@ enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    Doctor {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
     },
     Dispatch {
         #[command(subcommand)]
@@ -121,6 +131,14 @@ enum ConfigCommand {
         from: PathBuf,
         #[arg(long)]
         write: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    Status {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
     },
 }
 
@@ -290,6 +308,16 @@ async fn main() -> Result<()> {
         Command::Config {
             command: ConfigCommand::Migrate { from, write },
         } => config_migrate(&from, write)?,
+        Command::Auth {
+            command: AuthCommand::Status { format },
+        } => auth_status(
+            resolve_runtime_paths(config_override.as_deref(), system)?,
+            format,
+        )?,
+        Command::Doctor { format } => doctor(
+            resolve_runtime_paths(config_override.as_deref(), system)?,
+            format,
+        )?,
         Command::Dispatch {
             command: DispatchCommand::DryRun { maker_harness },
         } => dispatch_dry_run(
@@ -695,6 +723,117 @@ fn print_paths(paths: spire_application::ResolvedPaths, format: OutputFormat) ->
         OutputFormat::Json => print_json(&paths)?,
     }
     Ok(())
+}
+
+fn auth_status(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Result<()> {
+    if paths.profile != spire_application::InstallationProfile::User {
+        anyhow::bail!(
+            "system-profile authentication requires its separate credential-store adapter; no user secret store was consulted"
+        );
+    }
+    let store = UserSecretStore::below_config_root(&paths.config_root);
+    let report = secret_status_report(&store);
+    print_diagnostic_report(&report, format)?;
+    Ok(())
+}
+
+fn doctor(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Result<()> {
+    let mut findings = Vec::new();
+    findings.push(DiagnosticFinding::required(
+        "SPIRE-DIAG-001",
+        AuthenticationState::Configured,
+        "Spire paths resolved for the selected installation profile",
+        None,
+    ));
+
+    let configuration_state = match load_config(Some(&paths.config_file), false) {
+        Ok(_) => AuthenticationState::Configured,
+        Err(_) => AuthenticationState::Unavailable,
+    };
+    findings.push(DiagnosticFinding::required(
+        "SPIRE-DIAG-002",
+        configuration_state,
+        "configuration validation",
+        (configuration_state == AuthenticationState::Unavailable).then_some(format!(
+            "spire config validate --config {}",
+            paths.config_file.display()
+        )),
+    ));
+
+    if paths.profile == spire_application::InstallationProfile::User {
+        findings.extend(
+            secret_status_report(&UserSecretStore::below_config_root(&paths.config_root)).findings,
+        );
+    } else {
+        findings.push(DiagnosticFinding::required(
+            "SPIRE-AUTH-003",
+            AuthenticationState::Unsupported,
+            "system-profile secret-store diagnostics are not implemented",
+            Some("use the advanced system credential-store adapter".into()),
+        ));
+    }
+    findings.push(DiagnosticFinding::required(
+        "SPIRE-AUTH-004",
+        AuthenticationState::Unsupported,
+        "GitHub authentication lifecycle is blocked pending the approved identity decision",
+        Some(
+            "select GitHub App or scoped bot token in docs/decisions/security-and-authority.md"
+                .into(),
+        ),
+    ));
+    let report = DiagnosticReport::from_findings(findings);
+    print_diagnostic_report(&report, format)?;
+    if !report.ready {
+        anyhow::bail!("Spire diagnostics are not ready")
+    }
+    Ok(())
+}
+
+fn secret_status_report(store: &UserSecretStore) -> DiagnosticReport {
+    let finding = |code: &str, secret: ManagedSecret, provider: &str, remediation: &str| {
+        let state = store
+            .status(secret)
+            .unwrap_or(AuthenticationState::Ambiguous);
+        DiagnosticFinding::required(
+            code,
+            state,
+            format!("{provider} service credential bundle status"),
+            (!state.is_ready()).then_some(remediation.to_owned()),
+        )
+    };
+    DiagnosticReport::from_findings(vec![
+        finding(
+            "SPIRE-AUTH-001",
+            ManagedSecret::LinearApiKey,
+            "Linear",
+            "install or inspect the Linear service credential with spire auth",
+        ),
+        finding(
+            "SPIRE-AUTH-002",
+            ManagedSecret::GitHubCredential,
+            "GitHub",
+            "install or inspect the GitHub service credential with spire auth",
+        ),
+    ])
+}
+
+fn print_diagnostic_report(report: &DiagnosticReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => print_json(report),
+        OutputFormat::Text => {
+            println!("ready: {}", report.ready);
+            for finding in &report.findings {
+                println!(
+                    "{}: {:?} — {}",
+                    finding.code, finding.state, finding.summary
+                );
+                if let Some(remediation) = &finding.remediation {
+                    println!("  remediation: {remediation}");
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 fn config_show(
