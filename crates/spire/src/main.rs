@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -56,6 +57,10 @@ enum Command {
         #[command(subcommand)]
         command: DbCommand,
     },
+    Ops {
+        #[command(subcommand)]
+        command: OpsCommand,
+    },
     Linear {
         #[command(subcommand)]
         command: LinearCommand,
@@ -107,6 +112,28 @@ enum DbCommand {
     Check {
         #[arg(long)]
         database: PathBuf,
+    },
+    BackupDaily {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    RestoreCheck {
+        #[arg(long)]
+        backup: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+    },
+    RestoreLatest {
+        #[arg(long)]
+        config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum OpsCommand {
+    Status {
+        #[arg(long)]
+        config: PathBuf,
     },
 }
 
@@ -234,6 +261,22 @@ async fn main() -> Result<()> {
                 .await?;
             println!("database integrity check passed");
         }
+        Command::Db {
+            command: DbCommand::BackupDaily { config },
+        } => backup_daily(load_config(config)?).await?,
+        Command::Db {
+            command:
+                DbCommand::RestoreCheck {
+                    backup,
+                    destination,
+                },
+        } => restore_check(backup, destination).await?,
+        Command::Db {
+            command: DbCommand::RestoreLatest { config },
+        } => restore_latest(load_config(config)?).await?,
+        Command::Ops {
+            command: OpsCommand::Status { config },
+        } => operations_status(load_config(config)?).await?,
         Command::Linear {
             command: LinearCommand::Get { config, issue },
         } => {
@@ -453,6 +496,109 @@ async fn github_reconcile(config: ValidatedConfig) -> Result<()> {
     print_json(&report)
 }
 
+async fn operations_status(config: ValidatedConfig) -> Result<()> {
+    let database = SqliteDatabase::initialize(
+        &config.config.runtime.database_path,
+        config.config.runtime.database_max_connections,
+    )
+    .await?;
+    let integrity = database.check_integrity().await.is_ok();
+    let workspace_root_healthy = config.config.runtime.workspace_root.is_dir();
+    print_json(&serde_json::json!({
+        "snapshot": database.operations_snapshot().await?,
+        "database_integrity": integrity,
+        "workspace_root_healthy": workspace_root_healthy,
+        "guard_thresholds": {
+            "minimum_free_disk_bytes": config.config.operations.minimum_free_disk_bytes,
+            "minimum_free_inodes": config.config.operations.minimum_free_inodes,
+        },
+        "host_disk_probe": "requires the systemd/host probe; admission remains fail-closed when unavailable",
+    }))
+}
+
+async fn backup_daily(config: ValidatedConfig) -> Result<()> {
+    let root = &config.config.runtime.backup_root;
+    fs::create_dir_all(root)
+        .with_context(|| format!("failed to create backup root {}", root.display()))?;
+    let destination = root.join(format!("spire-{}.db", unix_now()));
+    let database = SqliteDatabase::initialize(
+        &config.config.runtime.database_path,
+        config.config.runtime.database_max_connections,
+    )
+    .await?;
+    database.backup_to(&destination).await?;
+    prune_dated_backups(root, config.config.operations.backup_retention_count)?;
+    print_json(
+        &serde_json::json!({"backup": destination, "retained": config.config.operations.backup_retention_count}),
+    )
+}
+
+async fn restore_check(backup: PathBuf, destination: PathBuf) -> Result<()> {
+    if destination.exists() {
+        anyhow::bail!(
+            "restore destination already exists: {}",
+            destination.display()
+        );
+    }
+    let parent = destination
+        .parent()
+        .context("restore destination must have a parent directory")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create restore directory {}", parent.display()))?;
+    fs::copy(&backup, &destination).with_context(|| {
+        format!(
+            "failed to copy backup {} to {}",
+            backup.display(),
+            destination.display()
+        )
+    })?;
+    let restored = SqliteDatabase::initialize(&destination, 1).await?;
+    restored.check_integrity().await?;
+    print_json(
+        &serde_json::json!({"restore_check": "passed", "destination": destination, "snapshot": restored.operations_snapshot().await?}),
+    )
+}
+
+async fn restore_latest(config: ValidatedConfig) -> Result<()> {
+    let backup = dated_backups(&config.config.runtime.backup_root)?
+        .pop()
+        .context("no dated Spire backup is available for a restore drill")?;
+    let destination = config
+        .config
+        .runtime
+        .data_root
+        .join("restore-drills")
+        .join(format!("spire-{}.db", unix_now()));
+    restore_check(backup.path(), destination).await
+}
+
+fn prune_dated_backups(root: &std::path::Path, retain: u16) -> Result<()> {
+    let mut backups = dated_backups(root)?;
+    let expired = backups.len().saturating_sub(usize::from(retain));
+    for entry in backups.drain(..expired) {
+        fs::remove_file(entry.path()).with_context(|| {
+            format!("failed to remove expired backup {}", entry.path().display())
+        })?;
+    }
+    Ok(())
+}
+
+fn dated_backups(root: &std::path::Path) -> Result<Vec<fs::DirEntry>> {
+    let mut backups = fs::read_dir(root)
+        .with_context(|| format!("failed to read backup root {}", root.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            (file_type.is_file() && name.starts_with("spire-") && name.ends_with(".db"))
+                .then_some(entry)
+        })
+        .collect::<Vec<_>>();
+    backups.sort_by_key(|entry| entry.file_name());
+    Ok(backups)
+}
+
 fn github_adapter(config: &ValidatedConfig) -> Result<GitHubHttpAdapter> {
     let repositories = config
         .config
@@ -586,8 +732,20 @@ fn health_router(readiness: Readiness) -> Router {
     Router::new()
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route("/admin/operations", get(operations))
         .layer(middleware::from_fn(request_id))
         .with_state(readiness)
+}
+
+async fn operations(
+    State(readiness): State<Readiness>,
+) -> std::result::Result<axum::Json<spire_application::OperationsSnapshot>, StatusCode> {
+    let database = readiness.database.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    database
+        .operations_snapshot()
+        .await
+        .map(axum::Json)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
 }
 
 /// The public handler is intentionally limited to raw-body verification and
