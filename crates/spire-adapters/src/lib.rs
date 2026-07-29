@@ -2,11 +2,11 @@
 
 //! Adapter composition boundary.
 //!
-//! Linear reads and SQLite are isolated infrastructure boundaries. Linear writes,
-//! GitHub, filesystem, systemd, and harness adapters remain deferred.
+//! Provider and persistence adapters live behind application-owned ports.
 
 pub struct AdapterBoundary;
 
+pub mod github;
 pub mod harness;
 pub mod linear;
 pub mod sqlite;
