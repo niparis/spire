@@ -5,8 +5,9 @@ use std::{
 };
 
 use spire_application::{
-    CanonicalPullRequest, CapacityCounts, CapacityLimits, CheckRun, PullRequestState,
-    RequiredCheckGate, SchedulerInitiator, capacity_allows,
+    CanonicalPullRequest, CapacityCounts, CapacityLimits, CheckRun, OperationsSnapshot,
+    PullRequestState, RequiredCheckGate, ReviewResult, ReviewVerdict, SchedulerInitiator,
+    capacity_allows,
 };
 use sqlx::{
     Row, Sqlite, SqlitePool,
@@ -37,6 +38,53 @@ async fn begin_immediate(connection: &mut PoolConnection<Sqlite>) -> Result<(), 
     unreachable!("the final write-attempt returns")
 }
 
+async fn commit_result<T>(
+    connection: &mut PoolConnection<Sqlite>,
+    result: Result<T, sqlx::Error>,
+) -> Result<T, SqliteAdapterError> {
+    match result {
+        Ok(value) => {
+            sqlx::query("COMMIT").execute(&mut **connection).await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut **connection).await;
+            Err(error.into())
+        }
+    }
+}
+
+async fn capacity_counts_for(
+    connection: &mut PoolConnection<Sqlite>,
+    work_item_id: &str,
+    repository: &str,
+) -> Result<CapacityCounts, sqlx::Error> {
+    Ok(CapacityCounts {
+        total: sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM runs WHERE status IN ('starting', 'running')",
+        )
+        .fetch_one(&mut **connection)
+        .await? as u16,
+        ai: sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM runs WHERE status IN ('starting', 'running') AND initiator = 'ai'",
+        )
+        .fetch_one(&mut **connection)
+        .await? as u16,
+        repository: sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM runs r JOIN work_items w ON w.id = r.work_item_id WHERE r.status IN ('starting', 'running') AND w.repository = ?",
+        )
+        .bind(repository)
+        .fetch_one(&mut **connection)
+        .await? as u16,
+        ticket: sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM runs WHERE status IN ('starting', 'running') AND work_item_id = ?",
+        )
+        .bind(work_item_id)
+        .fetch_one(&mut **connection)
+        .await? as u16,
+    })
+}
+
 fn is_busy(error: &sqlx::Error) -> bool {
     error.as_database_error().is_some_and(|database| {
         matches!(database.code().as_deref(), Some("5") | Some("SQLITE_BUSY"))
@@ -48,6 +96,14 @@ fn initiator_name(initiator: SchedulerInitiator) -> &'static str {
         SchedulerInitiator::Human => "human",
         SchedulerInitiator::Ai => "ai",
         SchedulerInitiator::System => "system",
+    }
+}
+
+fn effort_name(effort: spire_domain::Effort) -> &'static str {
+    match effort {
+        spire_domain::Effort::Low => "low",
+        spire_domain::Effort::Medium => "medium",
+        spire_domain::Effort::High => "high",
     }
 }
 
@@ -63,6 +119,8 @@ pub enum SqliteAdapterError {
     IntegrityCheckFailed(String),
     #[error("SQLite error: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("review result contract is invalid: {0}")]
+    ReviewContract(String),
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
 }
@@ -137,8 +195,10 @@ pub struct RootClaim<'a> {
     pub complexity_class: &'a str,
     pub implementation_rule_id: &'a str,
     pub review_rule_id: &'a str,
+    pub policy_version: u32,
     pub candidate_json: &'a str,
     pub evaluation_json: &'a str,
+    pub review_candidate_json: &'a str,
     pub harness: &'a str,
     pub model: &'a str,
     pub effort: &'a str,
@@ -174,6 +234,61 @@ pub enum CiCorrectionPersistence {
     Exhausted,
     NoStickyMaker,
     StaleWorkItem,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewDispatch<'a> {
+    pub work_item_id: &'a str,
+    pub run_id: &'a str,
+    pub review_cycle_id: &'a str,
+    pub decision_id: &'a str,
+    pub evaluation_json: &'a str,
+    pub selected_candidate_index: usize,
+    pub harness: &'a str,
+    pub model: &'a str,
+    pub effort: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewDispatchPersistence {
+    Scheduled { round: u8 },
+    AlreadyScheduled,
+    CapacityBlocked,
+    SameAsMaker,
+    MissingStickyMaker,
+    CandidateNotSnapshotted,
+    StaleWorkItem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewResultPersistence {
+    Applied { verdict: ReviewVerdict },
+    StaleHead,
+    InvalidCiGate,
+    StaleWorkItem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewCorrectionPersistence {
+    Scheduled { cycle: u8 },
+    CapacityBlocked,
+    Exhausted,
+    MissingStickyMaker,
+    StaleWorkItem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewWaiverPersistence {
+    Applied,
+    Unauthorized,
+    StaleHead,
+    InvalidCiGate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewPublicationPersistence {
+    Applied,
+    StaleHead,
 }
 
 impl SqliteDatabase {
@@ -250,6 +365,39 @@ impl SqliteDatabase {
         .fetch_one(&self.pool)
         .await?;
         Ok((total as u64, ai as u64))
+    }
+
+    /// A bounded, non-sensitive operational snapshot for the loopback admin
+    /// surface. It is intentionally aggregate-only: ticket text and provider
+    /// credentials never appear in operational telemetry.
+    pub async fn operations_snapshot(&self) -> Result<OperationsSnapshot, SqliteAdapterError> {
+        Ok(OperationsSnapshot {
+            inbox_depth: sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM webhook_inbox WHERE status IN ('pending', 'processing')",
+            )
+            .fetch_one(&self.pool)
+            .await? as u64,
+            outbox_depth: sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM outbox WHERE status IN ('pending', 'leased')",
+            )
+            .fetch_one(&self.pool)
+            .await? as u64,
+            active_runs: sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM runs WHERE status IN ('starting', 'running', 'cancel_requested')",
+            )
+            .fetch_one(&self.pool)
+            .await? as u64,
+            active_ai_runs: sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM runs WHERE status IN ('starting', 'running', 'cancel_requested') AND initiator = 'ai'",
+            )
+            .fetch_one(&self.pool)
+            .await? as u64,
+            terminal_workspace_cleanup_backlog: sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM workspaces ws JOIN work_items wi ON wi.id = ws.work_item_id WHERE wi.state IN ('blocked', 'completed', 'canceled') AND ws.cleanup_completed_at IS NULL",
+            )
+            .fetch_one(&self.pool)
+            .await? as u64,
+        })
     }
 
     pub async fn pragma(&self, name: &str) -> Result<String, SqliteAdapterError> {
@@ -505,6 +653,8 @@ impl SqliteDatabase {
             if head_changed {
                 sqlx::query("UPDATE review_cycles SET ci_state = 'invalidated', review_state = 'invalidated', updated_at = ? WHERE work_item_id = ? AND head_sha != ?")
                     .bind(now).bind(work_item_id).bind(pull_request.head_sha.as_str()).execute(&mut *connection).await?;
+                sqlx::query("UPDATE review_waivers SET invalidated_at = ? WHERE work_item_id = ? AND head_sha != ? AND invalidated_at IS NULL")
+                    .bind(now).bind(work_item_id).bind(pull_request.head_sha.as_str()).execute(&mut *connection).await?;
                 // A stale checker may finish, but it cannot advance an invalidated cycle.
                 sqlx::query("UPDATE runs SET status = 'cancel_requested', updated_at = ? WHERE work_item_id = ? AND role = 'review' AND status IN ('queued', 'starting', 'running')")
                     .bind(now).bind(work_item_id).execute(&mut *connection).await?;
@@ -658,6 +808,209 @@ impl SqliteDatabase {
         }
     }
 
+    /// Creates exactly one fresh, different-harness review run for a CI-green
+    /// current head. The whole admission decision is one short transaction.
+    pub async fn schedule_review(
+        &self,
+        dispatch: ReviewDispatch<'_>,
+        limits: CapacityLimits,
+        now: i64,
+    ) -> Result<ReviewDispatchPersistence, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let result = async {
+            let item = sqlx::query("SELECT repository, current_head_sha, base_sha, review_correction_cycles, review_candidates_json, review_policy_version, review_rule_id FROM work_items WHERE id = ? AND state = 'waiting_for_review'")
+                .bind(dispatch.work_item_id).fetch_optional(&mut *connection).await?;
+            let Some(item) = item else { return Ok::<_, sqlx::Error>(ReviewDispatchPersistence::StaleWorkItem) };
+            let head_sha = item.get::<Option<String>, _>("current_head_sha");
+            let base_sha = item.get::<Option<String>, _>("base_sha");
+            let (Some(head_sha), Some(base_sha)) = (head_sha, base_sha) else { return Ok(ReviewDispatchPersistence::StaleWorkItem) };
+            let existing = sqlx::query("SELECT review_state, review_run_id FROM review_cycles WHERE work_item_id = ? AND head_sha = ?")
+                .bind(dispatch.work_item_id).bind(&head_sha).fetch_optional(&mut *connection).await?;
+            if existing.is_some() {
+                return Ok(ReviewDispatchPersistence::AlreadyScheduled);
+            }
+            let repository = item.get::<Option<String>, _>("repository").unwrap_or_default();
+            let counts = capacity_counts_for(&mut connection, dispatch.work_item_id, &repository).await?;
+            if capacity_allows(limits, counts, SchedulerInitiator::Ai).is_err() {
+                return Ok(ReviewDispatchPersistence::CapacityBlocked);
+            }
+            let maker = sqlx::query("SELECT id, root_run_id, harness FROM runs WHERE work_item_id = ? AND role = 'implementation' ORDER BY created_at ASC LIMIT 1")
+                .bind(dispatch.work_item_id).fetch_optional(&mut *connection).await?;
+            let Some(maker) = maker else { return Ok(ReviewDispatchPersistence::MissingStickyMaker) };
+            if maker.get::<String, _>("harness") == dispatch.harness {
+                return Ok(ReviewDispatchPersistence::SameAsMaker);
+            }
+            let candidates_json = item.get::<String, _>("review_candidates_json");
+            let candidates = serde_json::from_str::<Vec<spire_domain::DispatchCandidate>>(&candidates_json).unwrap_or_default();
+            if !candidates.iter().any(|candidate| candidate.harness.as_str() == dispatch.harness && candidate.model.as_str() == dispatch.model && effort_name(candidate.effort) == dispatch.effort) {
+                return Ok(ReviewDispatchPersistence::CandidateNotSnapshotted);
+            }
+            let round = item.get::<i64, _>("review_correction_cycles") as u8 + 1;
+            sqlx::query("INSERT INTO review_cycles (id, work_item_id, round, implementation_run_id, base_sha, head_sha, ci_state, review_state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'succeeded', 'running', ?, ?)")
+                .bind(dispatch.review_cycle_id).bind(dispatch.work_item_id).bind(i64::from(round)).bind(maker.get::<String, _>("id")).bind(&base_sha).bind(&head_sha).bind(now).bind(now).execute(&mut *connection).await?;
+            sqlx::query("INSERT INTO dispatch_decisions (id, work_item_id, run_id, policy_version, rule_id, role, complexity_estimate, complexity_class, candidate_schema_version, candidates_json, selected_candidate_index, candidate_evaluation_schema_version, candidate_evaluations_json, created_at) SELECT ?, w.id, ?, w.review_policy_version, w.review_rule_id, 'review', dd.complexity_estimate, dd.complexity_class, 1, w.review_candidates_json, ?, 1, ?, ? FROM work_items w JOIN dispatch_decisions dd ON dd.work_item_id = w.id AND dd.role = 'implementation' WHERE w.id = ? ORDER BY dd.created_at ASC LIMIT 1")
+                .bind(dispatch.decision_id).bind(dispatch.run_id).bind(dispatch.selected_candidate_index as i64).bind(dispatch.evaluation_json).bind(now).bind(dispatch.work_item_id).execute(&mut *connection).await?;
+            sqlx::query("INSERT INTO runs (id, work_item_id, parent_run_id, root_run_id, role, harness, model, effort, status, dispatch_decision_id, initiator, trigger_kind, created_at, updated_at) VALUES (?, ?, ?, ?, 'review', ?, ?, ?, 'starting', ?, 'ai', 'review_required', ?, ?)")
+                .bind(dispatch.run_id).bind(dispatch.work_item_id).bind(maker.get::<String, _>("id")).bind(maker.get::<String, _>("root_run_id")).bind(dispatch.harness).bind(dispatch.model).bind(dispatch.effort).bind(dispatch.decision_id).bind(now).bind(now).execute(&mut *connection).await?;
+            sqlx::query("UPDATE review_cycles SET review_run_id = ? WHERE id = ?")
+                .bind(dispatch.run_id).bind(dispatch.review_cycle_id).execute(&mut *connection).await?;
+            sqlx::query("UPDATE work_items SET active_run_id = ?, updated_at = ? WHERE id = ?")
+                .bind(dispatch.run_id).bind(now).bind(dispatch.work_item_id).execute(&mut *connection).await?;
+            Ok(ReviewDispatchPersistence::Scheduled { round })
+        }.await;
+        commit_result(&mut connection, result).await
+    }
+
+    /// Stores only a schema-validated review result. An approval cannot advance
+    /// a changed head or a failed CI gate, even if the reviewer finishes later.
+    pub async fn record_review_result(
+        &self,
+        work_item_id: &str,
+        review_cycle_id: &str,
+        review_run_id: &str,
+        result: &ReviewResult,
+        now: i64,
+    ) -> Result<ReviewResultPersistence, SqliteAdapterError> {
+        result
+            .validate_for(&result.reviewed_head_sha)
+            .map_err(|error| SqliteAdapterError::ReviewContract(error.to_string()))?;
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let transaction = async {
+            let row = sqlx::query("SELECT w.current_head_sha, w.linear_issue_id, c.ci_state, c.review_state FROM review_cycles c JOIN work_items w ON w.id = c.work_item_id WHERE c.id = ? AND c.work_item_id = ? AND c.review_run_id = ?")
+                .bind(review_cycle_id).bind(work_item_id).bind(review_run_id).fetch_optional(&mut *connection).await?;
+            let Some(row) = row else { return Ok::<_, sqlx::Error>(ReviewResultPersistence::StaleWorkItem) };
+            if row.get::<Option<String>, _>("current_head_sha").as_deref() != Some(result.reviewed_head_sha.as_str()) {
+                return Ok(ReviewResultPersistence::StaleHead);
+            }
+            if row.get::<String, _>("ci_state") != "succeeded" || row.get::<String, _>("review_state") != "running" {
+                return Ok(ReviewResultPersistence::InvalidCiGate);
+            }
+            for finding in &result.findings {
+                sqlx::query("INSERT INTO review_findings (id, review_cycle_id, stable_id, severity, file, line, title, rationale, requested_change, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(review_cycle_id, stable_id) DO NOTHING")
+                    .bind(Uuid::new_v4().to_string()).bind(review_cycle_id).bind(&finding.stable_id).bind(match finding.severity { spire_application::FindingSeverity::Critical => "critical", spire_application::FindingSeverity::High => "high", spire_application::FindingSeverity::Medium => "medium", spire_application::FindingSeverity::Low => "low" }).bind(&finding.file).bind(finding.line.map(i64::from)).bind(&finding.title).bind(&finding.rationale).bind(&finding.requested_change).bind(now).execute(&mut *connection).await?;
+            }
+            let state = match result.verdict { ReviewVerdict::Approved => "human_ready", ReviewVerdict::ChangesRequired => "waiting_for_review", ReviewVerdict::Blocked => "blocked" };
+            sqlx::query("UPDATE review_cycles SET review_state = ?, completed_at = ?, updated_at = ? WHERE id = ?")
+                .bind(result.verdict.as_str()).bind(now).bind(now).bind(review_cycle_id).execute(&mut *connection).await?;
+            sqlx::query("UPDATE runs SET status = 'succeeded', updated_at = ? WHERE id = ? AND status IN ('starting', 'running')")
+                .bind(now).bind(review_run_id).execute(&mut *connection).await?;
+            sqlx::query("UPDATE work_items SET state = ?, active_run_id = NULL, updated_at = ? WHERE id = ? AND current_head_sha = ?")
+                .bind(state).bind(now).bind(work_item_id).bind(result.reviewed_head_sha.as_str()).execute(&mut *connection).await?;
+            let payload = serde_json::json!({"review_cycle_id": review_cycle_id, "reviewed_head_sha": result.reviewed_head_sha.as_str(), "verdict": result.verdict.as_str(), "summary": result.summary});
+            sqlx::query("INSERT INTO outbox (id, kind, aggregate_id, idempotency_key, payload_json, status, attempts, next_attempt_at, created_at, updated_at) VALUES (?, 'github_review_summary', ?, ?, ?, 'pending', 0, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING")
+                .bind(Uuid::new_v4().to_string()).bind(work_item_id).bind(format!("review:{review_run_id}:{}", result.reviewed_head_sha.as_str())).bind(payload.to_string()).bind(now).bind(now).bind(now).execute(&mut *connection).await?;
+            if let Some(issue_id) = row.get::<Option<String>, _>("linear_issue_id") {
+                let key = format!("review-linear:{review_run_id}:{}", result.reviewed_head_sha.as_str());
+                let marker = spire_application::comment_marker(&key);
+                let body = format!(
+                    "Spire independent review for SHA `{}`: `{}`. {}\n\n{}\n",
+                    result.reviewed_head_sha,
+                    result.verdict.as_str(),
+                    spire_application::sanitize(&result.summary, 200),
+                    marker,
+                );
+                let payload = serde_json::json!({"issue_id": issue_id, "marker": marker, "body": body});
+                sqlx::query("INSERT INTO outbox (id, kind, aggregate_id, idempotency_key, payload_json, status, attempts, next_attempt_at, created_at, updated_at) VALUES (?, 'linear_comment', ?, ?, ?, 'pending', 0, ?, ?, ?) ON CONFLICT(idempotency_key) DO NOTHING")
+                    .bind(Uuid::new_v4().to_string()).bind(work_item_id).bind(key).bind(payload.to_string()).bind(now).bind(now).bind(now).execute(&mut *connection).await?;
+            }
+            Ok(ReviewResultPersistence::Applied { verdict: result.verdict })
+        }.await;
+        commit_result(&mut connection, transaction).await
+    }
+
+    /// Schedules the maker correction after an actionable current-SHA review.
+    /// Capacity waits return without incrementing the engineering cycle.
+    pub async fn schedule_review_correction(
+        &self,
+        work_item_id: &str,
+        run_id: &str,
+        limits: CapacityLimits,
+        now: i64,
+    ) -> Result<ReviewCorrectionPersistence, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let transaction = async {
+            let item = sqlx::query("SELECT repository, current_head_sha, review_correction_cycles FROM work_items WHERE id = ? AND state = 'waiting_for_review'")
+                .bind(work_item_id).fetch_optional(&mut *connection).await?;
+            let Some(item) = item else { return Ok::<_, sqlx::Error>(ReviewCorrectionPersistence::StaleWorkItem) };
+            let Some(head_sha) = item.get::<Option<String>, _>("current_head_sha") else { return Ok(ReviewCorrectionPersistence::StaleWorkItem) };
+            let cycle = sqlx::query("SELECT review_run_id FROM review_cycles WHERE work_item_id = ? AND head_sha = ? AND review_state = 'changes_required'")
+                .bind(work_item_id).bind(&head_sha).fetch_optional(&mut *connection).await?;
+            let Some(cycle) = cycle else { return Ok(ReviewCorrectionPersistence::StaleWorkItem) };
+            let completed = item.get::<i64, _>("review_correction_cycles") as u8;
+            if completed >= spire_application::MAX_INITIAL_REVIEW_CORRECTION_CYCLES {
+                sqlx::query("UPDATE work_items SET state = 'blocked', updated_at = ? WHERE id = ?").bind(now).bind(work_item_id).execute(&mut *connection).await?;
+                return Ok(ReviewCorrectionPersistence::Exhausted);
+            }
+            let repository = item.get::<Option<String>, _>("repository").unwrap_or_default();
+            let counts = capacity_counts_for(&mut connection, work_item_id, &repository).await?;
+            if capacity_allows(limits, counts, SchedulerInitiator::Ai).is_err() { return Ok(ReviewCorrectionPersistence::CapacityBlocked); }
+            let maker = sqlx::query("SELECT id, root_run_id, harness, model, effort FROM runs WHERE work_item_id = ? AND role = 'implementation' ORDER BY created_at ASC LIMIT 1")
+                .bind(work_item_id).fetch_optional(&mut *connection).await?;
+            let Some(maker) = maker else { return Ok(ReviewCorrectionPersistence::MissingStickyMaker) };
+            let next_cycle = completed + 1;
+            sqlx::query("INSERT INTO runs (id, work_item_id, parent_run_id, root_run_id, role, harness, model, effort, status, initiator, trigger_kind, created_at, updated_at) VALUES (?, ?, ?, ?, 'implementation', ?, ?, ?, 'starting', 'ai', 'review_changes_requested', ?, ?)")
+                .bind(run_id).bind(work_item_id).bind(cycle.get::<Option<String>, _>("review_run_id")).bind(maker.get::<String, _>("root_run_id")).bind(maker.get::<String, _>("harness")).bind(maker.get::<String, _>("model")).bind(maker.get::<String, _>("effort")).bind(now).bind(now).execute(&mut *connection).await?;
+            sqlx::query("UPDATE work_items SET state = 'implementing', active_run_id = ?, review_correction_cycles = ?, updated_at = ? WHERE id = ?")
+                .bind(run_id).bind(i64::from(next_cycle)).bind(now).bind(work_item_id).execute(&mut *connection).await?;
+            Ok(ReviewCorrectionPersistence::Scheduled { cycle: next_cycle })
+        }.await;
+        commit_result(&mut connection, transaction).await
+    }
+
+    /// An authenticated human may waive review findings only for a CI-green,
+    /// unchanged SHA. A later push invalidates the row in the PR update path.
+    pub async fn apply_review_waiver(
+        &self,
+        work_item_id: &str,
+        head_sha: &str,
+        actor: &str,
+        reason: &str,
+        authorized: bool,
+        now: i64,
+    ) -> Result<ReviewWaiverPersistence, SqliteAdapterError> {
+        if !authorized || actor.trim().is_empty() || reason.trim().is_empty() {
+            return Ok(ReviewWaiverPersistence::Unauthorized);
+        }
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let transaction = async {
+            let cycle = sqlx::query("SELECT c.ci_state FROM review_cycles c JOIN work_items w ON w.id = c.work_item_id WHERE c.work_item_id = ? AND c.head_sha = ? AND w.current_head_sha = ? AND w.active_run_id IS NULL")
+                .bind(work_item_id).bind(head_sha).bind(head_sha).fetch_optional(&mut *connection).await?;
+            let Some(cycle) = cycle else { return Ok::<_, sqlx::Error>(ReviewWaiverPersistence::StaleHead) };
+            if cycle.get::<String, _>("ci_state") != "succeeded" { return Ok(ReviewWaiverPersistence::InvalidCiGate); }
+            sqlx::query("INSERT INTO review_waivers (id, work_item_id, head_sha, actor, reason, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(work_item_id, head_sha) DO NOTHING")
+                .bind(Uuid::new_v4().to_string()).bind(work_item_id).bind(head_sha).bind(actor).bind(reason).bind(now).execute(&mut *connection).await?;
+            sqlx::query("UPDATE work_items SET state = 'human_ready', active_run_id = NULL, updated_at = ? WHERE id = ? AND current_head_sha = ?")
+                .bind(now).bind(work_item_id).bind(head_sha).execute(&mut *connection).await?;
+            Ok(ReviewWaiverPersistence::Applied)
+        }.await;
+        commit_result(&mut connection, transaction).await
+    }
+
+    pub async fn record_review_publication(
+        &self,
+        review_cycle_id: &str,
+        head_sha: &str,
+        published_comment_id: &str,
+        now: i64,
+    ) -> Result<ReviewPublicationPersistence, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let result = sqlx::query("UPDATE review_cycles SET published_comment_id = COALESCE(published_comment_id, ?), updated_at = ? WHERE id = ? AND head_sha = ? AND EXISTS (SELECT 1 FROM work_items w WHERE w.id = review_cycles.work_item_id AND w.current_head_sha = review_cycles.head_sha)")
+            .bind(published_comment_id).bind(now).bind(review_cycle_id).bind(head_sha).execute(&self.pool).await?;
+        Ok(if result.rows_affected() == 1 {
+            ReviewPublicationPersistence::Applied
+        } else {
+            ReviewPublicationPersistence::StaleHead
+        })
+    }
+
     /// Observations only replace unclaimed work with an equal-or-newer canonical revision.
     pub async fn upsert_linear_observation(
         &self,
@@ -712,12 +1065,14 @@ impl SqliteDatabase {
                 ticket: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs WHERE status IN ('starting', 'running') AND work_item_id = ?").bind(claim.work_item_id).fetch_one(&mut *connection).await? as u16,
             };
             if capacity_allows(limits, counts, claim.initiator).is_err() { return Ok::<RootClaimResult, sqlx::Error>(RootClaimResult::CapacityBlocked); }
-            sqlx::query("INSERT INTO dispatch_decisions (id, work_item_id, run_id, policy_version, rule_id, role, complexity_estimate, complexity_class, candidate_schema_version, candidates_json, selected_candidate_index, candidate_evaluation_schema_version, candidate_evaluations_json, created_at) VALUES (?, ?, ?, 1, ?, 'implementation', ?, ?, 1, ?, 0, 1, ?, ?)")
-                .bind(claim.decision_id).bind(claim.work_item_id).bind(claim.run_id).bind(claim.implementation_rule_id).bind(i64::from(claim.raw_estimate)).bind(claim.complexity_class).bind(claim.candidate_json).bind(claim.evaluation_json).bind(now).execute(&mut *connection).await?;
+            sqlx::query("INSERT INTO dispatch_decisions (id, work_item_id, run_id, policy_version, rule_id, role, complexity_estimate, complexity_class, candidate_schema_version, candidates_json, selected_candidate_index, candidate_evaluation_schema_version, candidate_evaluations_json, created_at) VALUES (?, ?, ?, ?, ?, 'implementation', ?, ?, 1, ?, 0, 1, ?, ?)")
+                .bind(claim.decision_id).bind(claim.work_item_id).bind(claim.run_id).bind(i64::from(claim.policy_version)).bind(claim.implementation_rule_id).bind(i64::from(claim.raw_estimate)).bind(claim.complexity_class).bind(claim.candidate_json).bind(claim.evaluation_json).bind(now).execute(&mut *connection).await?;
             sqlx::query("INSERT INTO runs (id, work_item_id, root_run_id, role, harness, model, effort, status, dispatch_decision_id, initiator, trigger_kind, created_at, updated_at) VALUES (?, ?, ?, 'implementation', ?, ?, ?, 'starting', ?, ?, ?, ?, ?)")
                 .bind(claim.run_id).bind(claim.work_item_id).bind(claim.run_id).bind(claim.harness).bind(claim.model).bind(claim.effort).bind(claim.decision_id).bind(initiator_name(claim.initiator)).bind(claim.trigger_kind).bind(now).bind(now).execute(&mut *connection).await?;
             sqlx::query("UPDATE work_items SET state = 'claiming', repository = ?, active_run_id = ?, updated_at = ? WHERE id = ?")
                 .bind(claim.repository).bind(claim.run_id).bind(now).bind(claim.work_item_id).execute(&mut *connection).await?;
+            sqlx::query("UPDATE work_items SET review_candidates_json = ?, review_policy_version = ?, review_rule_id = ? WHERE id = ?")
+                .bind(claim.review_candidate_json).bind(i64::from(claim.policy_version)).bind(claim.review_rule_id).bind(claim.work_item_id).execute(&mut *connection).await?;
             Ok(RootClaimResult::Claimed)
         }.await;
         match result {
@@ -1514,8 +1869,10 @@ mod tests {
             complexity_class: "medium",
             implementation_rule_id: "implementation",
             review_rule_id: "review",
+            policy_version: 1,
             candidate_json: "[]",
             evaluation_json: "[]",
+            review_candidate_json: "[]",
             harness: "codex",
             model: "model",
             effort: "medium",
@@ -1644,5 +2001,177 @@ mod tests {
             run,
             ("codex".into(), "model".into(), "medium".into(), "ai".into())
         );
+    }
+
+    #[tokio::test]
+    async fn review_is_deduplicated_sha_bound_and_routes_to_the_sticky_maker() {
+        use spire_application::{FindingSeverity, ReviewFinding, ReviewResult, ReviewVerdict};
+        use spire_domain::CommitSha;
+
+        let database = database().await;
+        insert_work_item(&database, "work-1").await;
+        sqlx::query("UPDATE work_items SET linear_issue_id = 'issue-1', repository = 'owner/repo', base_sha = 'base', current_head_sha = 'head', state = 'waiting_for_review', review_candidates_json = ?, review_policy_version = 7, review_rule_id = 'review-snapshot' WHERE id = 'work-1'")
+            .bind(r#"[{"harness":"claude-code","model":"review-model","effort":"high"}]"#)
+            .execute(database.pool()).await.unwrap();
+        database
+            .create_run(
+                RunRecord {
+                    id: "maker",
+                    work_item_id: "work-1",
+                    parent_run_id: None,
+                    root_run_id: "maker",
+                    role: "implementation",
+                    harness: "codex",
+                    model: "maker-model",
+                    effort: "medium",
+                    status: "succeeded",
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO dispatch_decisions (id, work_item_id, run_id, policy_version, rule_id, role, complexity_estimate, complexity_class, candidate_schema_version, candidates_json, selected_candidate_index, candidate_evaluation_schema_version, candidate_evaluations_json, created_at) VALUES ('maker-decision', 'work-1', 'maker', 7, 'implementation-snapshot', 'implementation', 2, 'medium', 1, '[]', 0, 1, '[]', 1)")
+            .execute(database.pool()).await.unwrap();
+        let limits = CapacityLimits {
+            total: 3,
+            ai: 1,
+            per_repository: 1,
+            per_ticket: 1,
+        };
+        let dispatch = ReviewDispatch {
+            work_item_id: "work-1",
+            run_id: "review-1",
+            review_cycle_id: "cycle-1",
+            decision_id: "review-decision",
+            evaluation_json: "[]",
+            selected_candidate_index: 0,
+            harness: "claude-code",
+            model: "review-model",
+            effort: "high",
+        };
+        assert_eq!(
+            database
+                .schedule_review(dispatch.clone(), limits, 2)
+                .await
+                .unwrap(),
+            ReviewDispatchPersistence::Scheduled { round: 1 }
+        );
+        assert_eq!(
+            database.schedule_review(dispatch, limits, 3).await.unwrap(),
+            ReviewDispatchPersistence::AlreadyScheduled
+        );
+        let review_decision: (i64, String, String) = sqlx::query_as("SELECT policy_version, rule_id, candidates_json FROM dispatch_decisions WHERE id = 'review-decision'").fetch_one(database.pool()).await.unwrap();
+        assert_eq!(review_decision.0, 7);
+        assert_eq!(review_decision.1, "review-snapshot");
+        assert!(review_decision.2.contains("claude-code"));
+
+        let changes = ReviewResult {
+            schema_version: 1,
+            verdict: ReviewVerdict::ChangesRequired,
+            reviewed_head_sha: CommitSha::new("head").unwrap(),
+            summary: "Fix this".into(),
+            findings: vec![ReviewFinding {
+                stable_id: "SPI-1".into(),
+                severity: FindingSeverity::High,
+                file: "src/lib.rs".into(),
+                line: Some(1),
+                title: "Incorrect result".into(),
+                rationale: "The result is wrong".into(),
+                requested_change: "Return the correct result".into(),
+            }],
+        };
+        assert_eq!(
+            database
+                .record_review_result("work-1", "cycle-1", "review-1", &changes, 4)
+                .await
+                .unwrap(),
+            ReviewResultPersistence::Applied {
+                verdict: ReviewVerdict::ChangesRequired
+            }
+        );
+        let review_actions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM outbox WHERE aggregate_id = 'work-1'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(review_actions, 2);
+        assert_eq!(
+            database
+                .schedule_review_correction("work-1", "fix-1", limits, 5)
+                .await
+                .unwrap(),
+            ReviewCorrectionPersistence::Scheduled { cycle: 1 }
+        );
+        let correction: (String, String, String) =
+            sqlx::query_as("SELECT harness, initiator, trigger_kind FROM runs WHERE id = 'fix-1'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            correction,
+            (
+                "codex".into(),
+                "ai".into(),
+                "review_changes_requested".into()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_review_and_unauthorized_waiver_cannot_make_a_pr_human_ready() {
+        use spire_application::{ReviewResult, ReviewVerdict};
+        use spire_domain::CommitSha;
+
+        let database = database().await;
+        insert_work_item(&database, "work-1").await;
+        sqlx::query("UPDATE work_items SET current_head_sha = 'new', state = 'waiting_for_review' WHERE id = 'work-1'").execute(database.pool()).await.unwrap();
+        sqlx::query("INSERT INTO review_cycles (id, work_item_id, head_sha, ci_state, review_state, created_at, updated_at) VALUES ('cycle-old', 'work-1', 'old', 'succeeded', 'running', 1, 1)").execute(database.pool()).await.unwrap();
+        database
+            .create_run(
+                RunRecord {
+                    id: "review-old",
+                    work_item_id: "work-1",
+                    parent_run_id: None,
+                    root_run_id: "review-old",
+                    role: "review",
+                    harness: "claude-code",
+                    model: "model",
+                    effort: "high",
+                    status: "running",
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE review_cycles SET review_run_id = 'review-old' WHERE id = 'cycle-old'")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let approval = ReviewResult {
+            schema_version: 1,
+            verdict: ReviewVerdict::Approved,
+            reviewed_head_sha: CommitSha::new("old").unwrap(),
+            summary: "Approved".into(),
+            findings: vec![],
+        };
+        assert_eq!(
+            database
+                .record_review_result("work-1", "cycle-old", "review-old", &approval, 2)
+                .await
+                .unwrap(),
+            ReviewResultPersistence::StaleHead
+        );
+        assert_eq!(
+            database
+                .apply_review_waiver("work-1", "new", "", "no", false, 3)
+                .await
+                .unwrap(),
+            ReviewWaiverPersistence::Unauthorized
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM work_items WHERE id = 'work-1'")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+        assert_eq!(state, "waiting_for_review");
     }
 }
