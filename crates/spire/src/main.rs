@@ -53,6 +53,10 @@ enum Command {
         #[command(subcommand)]
         command: LinearCommand,
     },
+    Scheduler {
+        #[command(subcommand)]
+        command: SchedulerCommand,
+    },
     Serve {
         #[arg(long)]
         config: PathBuf,
@@ -108,6 +112,25 @@ enum LinearCommand {
         #[arg(long)]
         config: PathBuf,
         issue: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SchedulerCommand {
+    Once {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Explain {
+        #[arg(long)]
+        config: PathBuf,
+        issue: String,
+    },
+    CapacityShow {
+        #[arg(long)]
+        config: PathBuf,
     },
 }
 
@@ -192,6 +215,53 @@ async fn main() -> Result<()> {
                 anyhow::bail!("Linear reconciliation is read-only in Sprint 03; pass --dry-run");
             }
             linear_reconcile(load_config(config)?).await?;
+        }
+        Command::Scheduler {
+            command: SchedulerCommand::Once { config, dry_run },
+        } => {
+            if !dry_run {
+                anyhow::bail!(
+                    "scheduler dispatch remains dry-run-only in Sprint 04; pass --dry-run"
+                );
+            }
+            let config = load_config(config)?;
+            let database = SqliteDatabase::initialize(
+                &config.config.runtime.database_path,
+                config.config.runtime.database_max_connections,
+            )
+            .await?;
+            let (total, ai) = database.capacity_counts().await?;
+            print_json(
+                &serde_json::json!({"dry_run": true, "claim": "not_started", "active_total": total, "active_ai": ai}),
+            )?;
+        }
+        Command::Scheduler {
+            command: SchedulerCommand::CapacityShow { config },
+        } => {
+            let config = load_config(config)?;
+            let database = SqliteDatabase::initialize(
+                &config.config.runtime.database_path,
+                config.config.runtime.database_max_connections,
+            )
+            .await?;
+            let (total, ai) = database.capacity_counts().await?;
+            print_json(
+                &serde_json::json!({"active_total": total, "active_ai": ai, "limits": {"total": config.config.concurrency.total_active_harness_runs, "ai": config.config.concurrency.ai_initiated_active_harness_runs}}),
+            )?;
+        }
+        Command::Scheduler {
+            command: SchedulerCommand::Explain { config, issue },
+        } => {
+            let config = load_config(config)?;
+            let database = SqliteDatabase::initialize(
+                &config.config.runtime.database_path,
+                config.config.runtime.database_max_connections,
+            )
+            .await?;
+            let (total, ai) = database.capacity_counts().await?;
+            print_json(
+                &serde_json::json!({"issue": issue, "active_total": total, "active_ai": ai, "claim": "requires canonical reconciliation and the atomic claim path", "linear_writes_enabled": false}),
+            )?;
         }
         Command::Serve { config } => serve(load_config(config)?).await?,
     }
