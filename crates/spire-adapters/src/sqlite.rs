@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use spire_application::{CapacityCounts, CapacityLimits, SchedulerInitiator, capacity_allows};
 use sqlx::{
     Row, Sqlite, SqlitePool,
     pool::PoolConnection,
@@ -37,6 +38,14 @@ fn is_busy(error: &sqlx::Error) -> bool {
     error.as_database_error().is_some_and(|database| {
         matches!(database.code().as_deref(), Some("5") | Some("SQLITE_BUSY"))
     })
+}
+
+fn initiator_name(initiator: SchedulerInitiator) -> &'static str {
+    match initiator {
+        SchedulerInitiator::Human => "human",
+        SchedulerInitiator::Ai => "ai",
+        SchedulerInitiator::System => "system",
+    }
 }
 
 #[derive(Debug, Error)]
@@ -114,6 +123,34 @@ pub struct LinearObservation<'a> {
     pub eligibility_reason: Option<&'a str>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RootClaim<'a> {
+    pub work_item_id: &'a str,
+    pub expected_revision: &'a str,
+    pub repository: &'a str,
+    pub run_id: &'a str,
+    pub decision_id: &'a str,
+    pub raw_estimate: u8,
+    pub complexity_class: &'a str,
+    pub implementation_rule_id: &'a str,
+    pub review_rule_id: &'a str,
+    pub candidate_json: &'a str,
+    pub evaluation_json: &'a str,
+    pub harness: &'a str,
+    pub model: &'a str,
+    pub effort: &'a str,
+    pub initiator: SchedulerInitiator,
+    pub trigger_kind: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootClaimResult {
+    Claimed,
+    RevisionChanged,
+    AlreadyOwned,
+    CapacityBlocked,
+}
+
 impl SqliteDatabase {
     pub async fn initialize(
         path: impl Into<PathBuf>,
@@ -174,6 +211,20 @@ impl SqliteDatabase {
 
     pub fn path(&self) -> &Path {
         &self.database_path
+    }
+
+    pub async fn capacity_counts(&self) -> Result<(u64, u64), SqliteAdapterError> {
+        let total = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM runs WHERE status IN ('starting', 'running')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let ai = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM runs WHERE status IN ('starting', 'running') AND initiator = 'ai'",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok((total as u64, ai as u64))
     }
 
     pub async fn pragma(&self, name: &str) -> Result<String, SqliteAdapterError> {
@@ -426,6 +477,50 @@ impl SqliteDatabase {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Makes the complete root claim durable before any provider or Linear work starts.
+    pub async fn claim_root(
+        &self,
+        claim: RootClaim<'_>,
+        limits: CapacityLimits,
+        now: i64,
+    ) -> Result<RootClaimResult, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let result = async {
+            let row = sqlx::query("SELECT revision, state FROM work_items WHERE id = ?")
+                .bind(claim.work_item_id).fetch_optional(&mut *connection).await?;
+            let Some(row) = row else { return Ok::<RootClaimResult, sqlx::Error>(RootClaimResult::RevisionChanged); };
+            if row.get::<String, _>("revision") != claim.expected_revision { return Ok::<RootClaimResult, sqlx::Error>(RootClaimResult::RevisionChanged); }
+            let state: String = row.get("state");
+            if matches!(state.as_str(), "claiming" | "queued" | "implementing" | "waiting_for_ci" | "waiting_for_review") { return Ok::<RootClaimResult, sqlx::Error>(RootClaimResult::AlreadyOwned); }
+            let counts = CapacityCounts {
+                total: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs WHERE status IN ('starting', 'running')").fetch_one(&mut *connection).await? as u16,
+                ai: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs WHERE status IN ('starting', 'running') AND initiator = 'ai'").fetch_one(&mut *connection).await? as u16,
+                repository: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs r JOIN work_items w ON w.id = r.work_item_id WHERE r.status IN ('starting', 'running') AND w.repository = ?").bind(claim.repository).fetch_one(&mut *connection).await? as u16,
+                ticket: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs WHERE status IN ('starting', 'running') AND work_item_id = ?").bind(claim.work_item_id).fetch_one(&mut *connection).await? as u16,
+            };
+            if capacity_allows(limits, counts, claim.initiator).is_err() { return Ok::<RootClaimResult, sqlx::Error>(RootClaimResult::CapacityBlocked); }
+            sqlx::query("INSERT INTO dispatch_decisions (id, work_item_id, run_id, policy_version, rule_id, role, complexity_estimate, complexity_class, candidate_schema_version, candidates_json, selected_candidate_index, candidate_evaluation_schema_version, candidate_evaluations_json, created_at) VALUES (?, ?, ?, 1, ?, 'implementation', ?, ?, 1, ?, 0, 1, ?, ?)")
+                .bind(claim.decision_id).bind(claim.work_item_id).bind(claim.run_id).bind(claim.implementation_rule_id).bind(i64::from(claim.raw_estimate)).bind(claim.complexity_class).bind(claim.candidate_json).bind(claim.evaluation_json).bind(now).execute(&mut *connection).await?;
+            sqlx::query("INSERT INTO runs (id, work_item_id, root_run_id, role, harness, model, effort, status, dispatch_decision_id, initiator, trigger_kind, created_at, updated_at) VALUES (?, ?, ?, 'implementation', ?, ?, ?, 'starting', ?, ?, ?, ?, ?)")
+                .bind(claim.run_id).bind(claim.work_item_id).bind(claim.run_id).bind(claim.harness).bind(claim.model).bind(claim.effort).bind(claim.decision_id).bind(initiator_name(claim.initiator)).bind(claim.trigger_kind).bind(now).bind(now).execute(&mut *connection).await?;
+            sqlx::query("UPDATE work_items SET state = 'claiming', repository = ?, active_run_id = ?, updated_at = ? WHERE id = ?")
+                .bind(claim.repository).bind(claim.run_id).bind(now).bind(claim.work_item_id).execute(&mut *connection).await?;
+            Ok(RootClaimResult::Claimed)
+        }.await;
+        match result {
+            Ok(value) => {
+                sqlx::query("COMMIT").execute(&mut *connection).await?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error.into())
+            }
+        }
     }
 
     pub async fn claim_inbox(
@@ -1172,5 +1267,72 @@ mod tests {
             ..newer
         };
         assert!(!database.upsert_linear_observation(active, 4).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn root_claim_is_exactly_once_at_the_database_boundary() {
+        let database = database().await;
+        database
+            .upsert_linear_observation(
+                LinearObservation {
+                    work_item_id: "work-1",
+                    linear_issue_id: "linear-1",
+                    linear_identifier: "SPI-1",
+                    team_id: "team",
+                    workflow_state_id: "ready",
+                    revision: "revision",
+                    raw_estimate: Some(2),
+                    complexity_class: Some("medium"),
+                    eligibility_reason: None,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let limits = CapacityLimits {
+            total: 1,
+            ai: 1,
+            per_repository: 1,
+            per_ticket: 1,
+        };
+        let first = RootClaim {
+            work_item_id: "work-1",
+            expected_revision: "revision",
+            repository: "owner/repo",
+            run_id: "run-1",
+            decision_id: "decision-1",
+            raw_estimate: 2,
+            complexity_class: "medium",
+            implementation_rule_id: "implementation",
+            review_rule_id: "review",
+            candidate_json: "[]",
+            evaluation_json: "[]",
+            harness: "codex",
+            model: "model",
+            effort: "medium",
+            initiator: SchedulerInitiator::Human,
+            trigger_kind: "linear_ready",
+        };
+        let second = RootClaim {
+            run_id: "run-2",
+            decision_id: "decision-2",
+            ..first.clone()
+        };
+        let left = database.clone();
+        let right = database.clone();
+        let (one, two) = tokio::join!(
+            left.claim_root(first, limits, 2),
+            right.claim_root(second, limits, 2)
+        );
+        assert!(
+            matches!(one.unwrap(), RootClaimResult::Claimed)
+                ^ matches!(two.unwrap(), RootClaimResult::Claimed)
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM runs WHERE work_item_id = 'work-1'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
     }
 }
