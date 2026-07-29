@@ -365,8 +365,14 @@ impl Config {
         for (path, reference) in [
             ("linear.credential_ref", self.linear.credential_ref.as_str()),
             ("github.credential_ref", self.github.credential_ref.as_str()),
-            ("webhook.signing_secret_ref", self.webhook.signing_secret_ref.as_str()),
-            ("github.webhook_secret_ref", self.github.webhook_secret_ref.as_str()),
+            (
+                "webhook.signing_secret_ref",
+                self.webhook.signing_secret_ref.as_str(),
+            ),
+            (
+                "github.webhook_secret_ref",
+                self.github.webhook_secret_ref.as_str(),
+            ),
         ] {
             ensure_credential_reference(path, reference)?;
         }

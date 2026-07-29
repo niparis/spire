@@ -797,7 +797,8 @@ fn is_allowlisted_github_repository(body: &[u8], allowlist: &BTreeSet<String>) -
 }
 
 fn unix_now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default()
 }
