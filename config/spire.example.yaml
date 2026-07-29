@@ -1,7 +1,7 @@
 # Sprint 00 contract template. This is deliberately not an operational
 # configuration: every REPLACE_ME value must be replaced and validated by
 # `spire config validate` before automation is enabled.
-schema_version: 2
+schema_version: 3
 
 linear:
   organization_id: REPLACE_ME_LINEAR_ORGANIZATION_ID
@@ -21,11 +21,15 @@ linear:
   repository_mappings: []
 
 github:
-  repository: REPLACE_ME_OWNER/REPLACE_ME_REPOSITORY
-  base_branch: REPLACE_ME_BASE_BRANCH
-  required_checks: []
   installation_id: REPLACE_ME_GITHUB_APP_INSTALLATION_ID
   credential_ref: systemd:credentials/github-app-private-key
+  webhook_secret_ref: systemd:credentials/github-webhook-secret
+  request_timeout_seconds: 30
+  repositories:
+    - repository: REPLACE_ME_OWNER/REPLACE_ME_REPOSITORY
+      base_branch: REPLACE_ME_BASE_BRANCH
+      required_checks: []
+      workspace_root: /var/lib/spire/workspaces/REPLACE_ME_OWNER-REPLACE_ME_REPOSITORY
 
 cloudflare:
   account_ref: REPLACE_ME_CLOUDFLARE_ACCOUNT_REFERENCE
@@ -72,6 +76,16 @@ runtime:
   evidence_root: /var/lib/spire/evidence
   implementation_timeout_seconds: 7200
   review_timeout_seconds: 1800
+
+# These guards stop only new harness admission. Reconciliation, recovery,
+# outbox delivery, backup, and cleanup remain available during a guard failure.
+operations:
+  minimum_free_disk_bytes: 10737418240
+  minimum_free_inodes: 10000
+  workspace_terminal_retention_seconds: 604800
+  evidence_terminal_retention_seconds: 604800
+  backup_retention_count: 7
+  backup_interval_seconds: 86400
 
 server:
   api_bind: 127.0.0.1:8080
