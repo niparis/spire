@@ -9,11 +9,12 @@ verifying, promoting, and recovering a Spire GitHub Release.
 
 ## Authority and version decision
 
-The named release owner is the only person who creates a release tag, approves the
-protected `release` environment, or changes GitHub's `latest` release pointer.
-`v1.0.3` was the retired Go CLI. The Rust orchestrator therefore starts the separate,
-incompatible `v2.0.0-rc.1` line; this is a SemVer release candidate, not a
-backwards-compatible 1.x patch.
+The named release owner is the only person who creates a release tag or approves
+the protected `release` environment. After that approval, the workflow alone may
+change GitHub's `latest` release pointer, and only after the published candidate
+passes every public installer smoke test. `v1.0.3` was the retired Go CLI. The Rust
+orchestrator therefore starts the separate, incompatible `v2.0.0-rc.1` line; this
+is a SemVer release candidate, not a backwards-compatible 1.x patch.
 
 No workflow or harness creates a tag, changes repository rules, enables release
 immutability, or merges code. Do not place a GitHub token in commands, logs, or
@@ -113,18 +114,19 @@ gh run list \
 5. The workflow publishes the verified candidate with `latest=false`.
 6. Public, version-pinned installer smoke tests run on Linux x86_64, macOS Intel,
    and macOS Apple Silicon.
-7. Approve the protected latest-promotion job only after all public smoke tests
-   pass. The workflow changes the latest pointer, downloads
+7. After all public smoke tests pass, the workflow automatically changes the
+   latest pointer, downloads
    `releases/latest/download/install.sh`, installs into a temporary directory, and
-   verifies the installed version.
+   verifies the installed version. If this verification fails, it restores the
+   previous latest pointer.
 
 In summary, the workflow:
 
 1. Validates and builds with read-only repository authority.
 2. Waits for human publication approval.
 3. Publishes a non-latest candidate and verifies it publicly.
-4. Waits for the latest-promotion gate.
-5. Promotes and verifies the latest alias, restoring the prior pointer on failure.
+4. Automatically promotes and verifies the latest alias after smoke tests pass,
+   restoring the prior pointer on failure.
 
 Each release contains exactly one archive for each supported target plus
 `SHA256SUMS`, `build-metadata.json`, and `install.sh`. Metadata records the source
@@ -136,10 +138,14 @@ After the workflow completes, confirm release state and assets:
 
 ```sh
 gh release view "${release_tag}" \
-  --json tagName,isDraft,isPrerelease,isLatest,publishedAt,assets,url
+  --json tagName,isDraft,isPrerelease,publishedAt,assets,url
+gh release list --limit 1 \
+  --json tagName,isLatest,isDraft,isPrerelease,publishedAt
 ```
 
-The expected assets are:
+The release view must report the intended tag as published and not a draft. The
+first release-list entry must report the same tag with `"isLatest": true`. The
+expected assets are:
 
 ```text
 spire-<tag>-x86_64-unknown-linux-musl.tar.gz
@@ -206,7 +212,8 @@ tag for this workflow:
 - A tag ruleset for `v*` that limits creation to release owners and forbids deletion
   or force updates.
 - The protected `release` environment with required reviewers. It is attached only
-  to the publication and latest-promotion jobs.
+  to the publication job; successful public smoke tests authorize automatic latest
+  promotion.
 - GitHub release immutability, enabled after a disposable candidate has demonstrated
   draft retry, publication, and recovery behavior.
 
