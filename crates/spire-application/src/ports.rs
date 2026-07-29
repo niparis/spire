@@ -149,7 +149,7 @@ pub trait GitHubPort {
         number: u64,
         idempotency_key: &IdempotencyKey,
         body: &str,
-    ) -> Result<ExternalResult<()>, Self::Error>;
+    ) -> Result<ExternalResult<PublishedComment>, Self::Error>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
