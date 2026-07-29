@@ -1,7 +1,7 @@
 # Sprint 00 contract template. This is deliberately not an operational
 # configuration: every REPLACE_ME value must be replaced and validated by
 # `spire config validate` before automation is enabled.
-schema_version: 3
+schema_version: 4
 
 linear:
   organization_id: REPLACE_ME_LINEAR_ORGANIZATION_ID
@@ -37,22 +37,16 @@ cloudflare:
   webhook_hostname: REPLACE_ME_WEBHOOK_HOSTNAME
 
 harnesses:
-  codex:
-    executable: codex
-    credential_ref: systemd:credentials/codex-auth
-    models: []
-    efforts: []
-  claude_code:
-    executable: claude
-    credential_ref: systemd:credentials/claude-auth
-    models: []
-    efforts: []
-
-dispatch:
-  policy_version: 1
-  # Empty rules are intentional until S00.2 records supported models and effort
-  # mappings. Production validation must reject this file.
-  rules: []
+  # Harness authentication remains native to the login user. The primary role
+  # selections compile deterministically into complete dispatch coverage.
+  maker:
+    provider: codex
+    model: REPLACE_ME_CODEX_MODEL
+    effort: high
+  reviewer:
+    provider: claude-code
+    model: REPLACE_ME_CLAUDE_MODEL
+    effort: high
 
 concurrency:
   total_active_harness_runs: 3
