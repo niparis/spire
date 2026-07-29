@@ -186,7 +186,11 @@ impl LinearReadPort for LinearReadAdapter {
     }
 }
 
-fn load_credential(reference: &str) -> Result<String, LinearAdapterError> {
+/// Resolves an operator-provided credential reference without logging it.
+///
+/// The API process uses the same narrowly scoped mechanism for the Linear
+/// webhook signing secret; credential material never leaves the caller.
+pub fn load_credential(reference: &str) -> Result<String, LinearAdapterError> {
     if let Some(name) = reference.strip_prefix("env:") {
         return env::var(name).map_err(|_| LinearAdapterError::CredentialUnavailable);
     }
