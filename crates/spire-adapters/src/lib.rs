@@ -10,5 +10,6 @@ pub mod cleanup;
 pub mod github;
 pub mod harness;
 pub mod linear;
+pub mod secrets;
 pub mod sqlite;
 pub mod workspace;
