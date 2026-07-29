@@ -3,6 +3,7 @@ set -euo pipefail
 
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly verifier="${repository_root}/scripts/release/verify-release.sh"
+readonly installer="${repository_root}/install.sh"
 readonly version="$(awk '
   /^\[workspace\.package\]$/ { in_workspace_package = 1; next }
   /^\[/ { in_workspace_package = 0 }
@@ -61,3 +62,12 @@ if "${verifier}" \
 fi
 
 printf 'release contract fixtures pass\n'
+
+"${installer}" --help >/dev/null
+"${installer}" --version "${tag}" --dry-run >/dev/null
+if "${installer}" --version invalid --dry-run >/dev/null 2>&1; then
+  printf 'invalid installer version unexpectedly passed validation\n' >&2
+  exit 1
+fi
+
+printf 'installer contract fixtures pass\n'
