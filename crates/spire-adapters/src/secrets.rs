@@ -1,4 +1,4 @@
-//! User-scoped `secrets.env` storage for Linear and GitHub service credentials.
+//! User-scoped `secrets.env` storage for Linear and GitHub App service credentials.
 //!
 //! This adapter intentionally does not serve system installations. A system
 //! credential store has a different ownership and privilege contract.
@@ -195,7 +195,11 @@ fn parse_bundle(contents: &str) -> Result<BTreeMap<String, String>, UserSecretSt
         let (key, value) = line
             .split_once('=')
             .ok_or(UserSecretStoreError::Malformed)?;
-        if !matches!(key, "LINEAR_API_KEY" | "GITHUB_CREDENTIAL") || values.contains_key(key) {
+        if !matches!(
+            key,
+            "LINEAR_API_KEY" | "GITHUB_APP_PRIVATE_KEY" | "GITHUB_WEBHOOK_SECRET"
+        ) || values.contains_key(key)
+        {
             return Err(UserSecretStoreError::Malformed);
         }
         validate_value(value)?;
@@ -207,7 +211,10 @@ fn parse_bundle(contents: &str) -> Result<BTreeMap<String, String>, UserSecretSt
 fn serialize_bundle(values: &BTreeMap<String, String>) -> Result<String, UserSecretStoreError> {
     let mut output = String::new();
     for (key, value) in values {
-        if !matches!(key.as_str(), "LINEAR_API_KEY" | "GITHUB_CREDENTIAL") {
+        if !matches!(
+            key.as_str(),
+            "LINEAR_API_KEY" | "GITHUB_APP_PRIVATE_KEY" | "GITHUB_WEBHOOK_SECRET"
+        ) {
             return Err(UserSecretStoreError::Malformed);
         }
         validate_value(value)?;
@@ -252,8 +259,14 @@ mod tests {
             .unwrap();
         store
             .replace(
-                ManagedSecret::GitHubCredential,
-                SecretInput::new("github-value".into()),
+                ManagedSecret::GitHubAppPrivateKey,
+                SecretInput::new("github-private-key".into()),
+            )
+            .unwrap();
+        store
+            .replace(
+                ManagedSecret::GitHubWebhookSecret,
+                SecretInput::new("github-webhook-secret".into()),
             )
             .unwrap();
         store.remove(ManagedSecret::LinearApiKey).unwrap();
@@ -263,7 +276,11 @@ mod tests {
             AuthenticationState::Unavailable
         );
         assert_eq!(
-            store.status(ManagedSecret::GitHubCredential).unwrap(),
+            store.status(ManagedSecret::GitHubAppPrivateKey).unwrap(),
+            AuthenticationState::Configured
+        );
+        assert_eq!(
+            store.status(ManagedSecret::GitHubWebhookSecret).unwrap(),
             AuthenticationState::Configured
         );
         assert_eq!(
@@ -303,6 +320,22 @@ mod tests {
         .unwrap();
         fs::set_permissions(store.path(), fs::Permissions::from_mode(0o600)).unwrap();
         let error = store.status(ManagedSecret::LinearApiKey).unwrap_err();
+        assert_eq!(error, UserSecretStoreError::Malformed);
+        assert!(!error.to_string().contains("SPIRE_SECRET_SENTINEL"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn generic_github_credential_records_are_rejected() {
+        let root = root("legacy-github-key");
+        let store = UserSecretStore::below_config_root(&root);
+        fs::write(store.path(), "GITHUB_CREDENTIAL=SPIRE_SECRET_SENTINEL\n").unwrap();
+        fs::set_permissions(store.path(), fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = store
+            .status(ManagedSecret::GitHubAppPrivateKey)
+            .unwrap_err();
+
         assert_eq!(error, UserSecretStoreError::Malformed);
         assert!(!error.to_string().contains("SPIRE_SECRET_SENTINEL"));
         let _ = fs::remove_dir_all(root);

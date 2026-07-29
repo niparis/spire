@@ -85,14 +85,16 @@ impl DiagnosticReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManagedSecret {
     LinearApiKey,
-    GitHubCredential,
+    GitHubAppPrivateKey,
+    GitHubWebhookSecret,
 }
 
 impl ManagedSecret {
     pub const fn key(self) -> &'static str {
         match self {
             Self::LinearApiKey => "LINEAR_API_KEY",
-            Self::GitHubCredential => "GITHUB_CREDENTIAL",
+            Self::GitHubAppPrivateKey => "GITHUB_APP_PRIVATE_KEY",
+            Self::GitHubWebhookSecret => "GITHUB_WEBHOOK_SECRET",
         }
     }
 }
@@ -198,5 +200,17 @@ mod tests {
     fn secret_input_debug_is_redacted() {
         let secret = SecretInput::new("SPIRE_SECRET_SENTINEL".into());
         assert!(!format!("{secret:?}").contains("SPIRE_SECRET_SENTINEL"));
+    }
+
+    #[test]
+    fn github_app_secret_parts_have_distinct_store_keys() {
+        assert_eq!(
+            ManagedSecret::GitHubAppPrivateKey.key(),
+            "GITHUB_APP_PRIVATE_KEY"
+        );
+        assert_eq!(
+            ManagedSecret::GitHubWebhookSecret.key(),
+            "GITHUB_WEBHOOK_SECRET"
+        );
     }
 }
