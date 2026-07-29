@@ -50,6 +50,20 @@ impl UserSecretStore {
         &self.path
     }
 
+    /// Supplies a secret only to the adapter that must authenticate to its
+    /// provider. This deliberately sits outside `SecretStorePort`, whose
+    /// application-facing methods never expose credential material.
+    pub fn read_for_service(
+        &self,
+        secret: ManagedSecret,
+    ) -> Result<SecretInput, UserSecretStoreError> {
+        let values = self.read_bundle()?;
+        let value = values
+            .get(secret.key())
+            .ok_or(UserSecretStoreError::Unavailable)?;
+        Ok(SecretInput::new(value.clone()))
+    }
+
     fn read_bundle(&self) -> Result<BTreeMap<String, String>, UserSecretStoreError> {
         let path_metadata =
             fs::symlink_metadata(&self.path).map_err(|_| UserSecretStoreError::Unavailable)?;
@@ -286,6 +300,28 @@ mod tests {
         assert_eq!(
             fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn service_read_is_limited_to_a_complete_bundle_value() {
+        let root = root("service-read");
+        let store = UserSecretStore::below_config_root(&root);
+        store
+            .replace(
+                ManagedSecret::LinearApiKey,
+                SecretInput::new("linear-value".into()),
+            )
+            .unwrap();
+
+        let value = store.read_for_service(ManagedSecret::LinearApiKey).unwrap();
+
+        assert_eq!(value.as_str(), "linear-value");
+        assert!(!format!("{value:?}").contains("linear-value"));
+        assert_eq!(
+            store.read_for_service(ManagedSecret::GitHubAppPrivateKey),
+            Err(UserSecretStoreError::Unavailable)
         );
         let _ = fs::remove_dir_all(root);
     }
