@@ -57,6 +57,10 @@ enum Command {
         #[command(subcommand)]
         command: SchedulerCommand,
     },
+    Runs {
+        #[command(subcommand)]
+        command: RunsCommand,
+    },
     Serve {
         #[arg(long)]
         config: PathBuf,
@@ -131,6 +135,17 @@ enum SchedulerCommand {
     CapacityShow {
         #[arg(long)]
         config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RunsCommand {
+    StartManual {
+        fixture_ticket: String,
+        #[arg(long)]
+        dry_linear: bool,
+        #[arg(long)]
+        dry_github: bool,
     },
 }
 
@@ -261,6 +276,23 @@ async fn main() -> Result<()> {
             let (total, ai) = database.capacity_counts().await?;
             print_json(
                 &serde_json::json!({"issue": issue, "active_total": total, "active_ai": ai, "claim": "requires canonical reconciliation and the atomic claim path", "linear_writes_enabled": false}),
+            )?;
+        }
+        Command::Runs {
+            command:
+                RunsCommand::StartManual {
+                    fixture_ticket,
+                    dry_linear,
+                    dry_github,
+                },
+        } => {
+            if !dry_linear || !dry_github {
+                anyhow::bail!(
+                    "manual harness starts require --dry-linear and --dry-github until write authority is approved"
+                );
+            }
+            print_json(
+                &serde_json::json!({"fixture_ticket": fixture_ticket, "dry_linear": true, "dry_github": true, "runner": "disabled_pending_captured_provider_fixtures", "started": false}),
             )?;
         }
         Command::Serve { config } => serve(load_config(config)?).await?,
