@@ -1,0 +1,7 @@
+{
+  "instructions": [
+    ".methodology/agents/SPIRE.md",
+    "AGENTS.md",
+    "docs/specs/PRODUCT.md"
+  ]
+}
