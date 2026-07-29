@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 
+mod runtime_paths;
+mod user_service;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Write,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -43,12 +47,30 @@ use uuid::Uuid;
     version
 )]
 struct Cli {
+    /// An absolute configuration file path. When omitted, Spire applies the
+    /// documented user-XDG then system-profile precedence.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+    /// Select the explicit machine-wide installation profile.
+    #[arg(long, global = true)]
+    system: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Paths {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+    Start,
+    Stop,
+    Status,
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -81,25 +103,45 @@ enum Command {
         #[command(subcommand)]
         command: RunsCommand,
     },
-    Serve {
-        #[arg(long)]
-        config: PathBuf,
-    },
+    Serve,
 }
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommand {
-    Validate {
+    Path,
+    Validate,
+    Show {
         #[arg(long)]
-        config: PathBuf,
+        effective: bool,
+        #[arg(long)]
+        redacted: bool,
     },
+    Migrate {
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long)]
+        write: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    Install {
+        /// Write the rendered unit after previewing it.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum OutputFormat {
+    Text,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
 enum DispatchCommand {
     DryRun {
-        #[arg(long)]
-        config: PathBuf,
         #[arg(long)]
         maker_harness: Option<String>,
     },
@@ -117,75 +159,50 @@ enum DbCommand {
         #[arg(long)]
         database: PathBuf,
     },
-    BackupDaily {
-        #[arg(long)]
-        config: PathBuf,
-    },
+    BackupDaily {},
     RestoreCheck {
         #[arg(long)]
         backup: PathBuf,
         #[arg(long)]
         destination: PathBuf,
     },
-    RestoreLatest {
-        #[arg(long)]
-        config: PathBuf,
-    },
+    RestoreLatest,
 }
 
 #[derive(Debug, Subcommand)]
 enum OpsCommand {
-    Status {
-        #[arg(long)]
-        config: PathBuf,
-    },
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
 enum LinearCommand {
     Get {
-        #[arg(long)]
-        config: PathBuf,
         issue: String,
     },
     Reconcile {
         #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
         dry_run: bool,
     },
     Explain {
-        #[arg(long)]
-        config: PathBuf,
         issue: String,
     },
 }
 
 #[derive(Debug, Subcommand)]
 enum GitHubCommand {
-    Reconcile {
-        #[arg(long)]
-        config: PathBuf,
-    },
+    Reconcile,
 }
 
 #[derive(Debug, Subcommand)]
 enum SchedulerCommand {
     Once {
         #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
         dry_run: bool,
     },
     Explain {
-        #[arg(long)]
-        config: PathBuf,
         issue: String,
     },
-    CapacityShow {
-        #[arg(long)]
-        config: PathBuf,
-    },
+    CapacityShow,
 }
 
 #[derive(Debug, Subcommand)]
@@ -231,20 +248,54 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
-    match Cli::parse().command {
+    let Cli {
+        config: config_override,
+        system,
+        command,
+    } = Cli::parse();
+    match command {
+        Command::Paths { format } => print_paths(
+            resolve_runtime_paths(config_override.as_deref(), system)?,
+            format,
+        )?,
+        Command::Service {
+            command: ServiceCommand::Install { yes },
+        } => user_service::install(
+            &resolve_runtime_paths(config_override.as_deref(), system)?,
+            &std::env::current_exe().context("unable to resolve installed Spire binary")?,
+            yes,
+        )?,
+        Command::Start => user_service::systemctl("start", system)?,
+        Command::Stop => user_service::systemctl("stop", system)?,
+        Command::Status => user_service::systemctl("status", system)?,
         Command::Config {
-            command: ConfigCommand::Validate { config },
+            command: ConfigCommand::Path,
+        } => print_paths(
+            resolve_runtime_paths(config_override.as_deref(), system)?,
+            OutputFormat::Text,
+        )?,
+        Command::Config {
+            command: ConfigCommand::Validate,
         } => {
-            load_config(config)?;
+            load_config(config_override.as_deref(), system)?;
             println!("configuration is valid");
         }
-        Command::Dispatch {
+        Command::Config {
             command:
-                DispatchCommand::DryRun {
-                    config,
-                    maker_harness,
+                ConfigCommand::Show {
+                    effective,
+                    redacted,
                 },
-        } => dispatch_dry_run(load_config(config)?, maker_harness)?,
+        } => config_show(config_override.as_deref(), system, effective, redacted)?,
+        Command::Config {
+            command: ConfigCommand::Migrate { from, write },
+        } => config_migrate(&from, write)?,
+        Command::Dispatch {
+            command: DispatchCommand::DryRun { maker_harness },
+        } => dispatch_dry_run(
+            load_config(config_override.as_deref(), system)?,
+            maker_harness,
+        )?,
         Command::Db {
             command:
                 DbCommand::Backup {
@@ -266,8 +317,8 @@ async fn main() -> Result<()> {
             println!("database integrity check passed");
         }
         Command::Db {
-            command: DbCommand::BackupDaily { config },
-        } => backup_daily(load_config(config)?).await?,
+            command: DbCommand::BackupDaily {},
+        } => backup_daily(load_config(config_override.as_deref(), system)?).await?,
         Command::Db {
             command:
                 DbCommand::RestoreCheck {
@@ -276,15 +327,15 @@ async fn main() -> Result<()> {
                 },
         } => restore_check(backup, destination).await?,
         Command::Db {
-            command: DbCommand::RestoreLatest { config },
-        } => restore_latest(load_config(config)?).await?,
+            command: DbCommand::RestoreLatest,
+        } => restore_latest(load_config(config_override.as_deref(), system)?).await?,
         Command::Ops {
-            command: OpsCommand::Status { config },
-        } => operations_status(load_config(config)?).await?,
+            command: OpsCommand::Status,
+        } => operations_status(load_config(config_override.as_deref(), system)?).await?,
         Command::Linear {
-            command: LinearCommand::Get { config, issue },
+            command: LinearCommand::Get { issue },
         } => {
-            let config = load_config(config)?;
+            let config = load_config(config_override.as_deref(), system)?;
             let issue = LinearIssueId::new(issue).context("invalid Linear issue ID")?;
             let adapter = linear_adapter(&config)?;
             match adapter.get_canonical_issue(&issue).await? {
@@ -296,9 +347,9 @@ async fn main() -> Result<()> {
             }
         }
         Command::Linear {
-            command: LinearCommand::Explain { config, issue },
+            command: LinearCommand::Explain { issue },
         } => {
-            let config = load_config(config)?;
+            let config = load_config(config_override.as_deref(), system)?;
             let issue_id = LinearIssueId::new(issue).context("invalid Linear issue ID")?;
             let adapter = linear_adapter(&config)?;
             match adapter.get_canonical_issue(&issue_id).await? {
@@ -310,25 +361,25 @@ async fn main() -> Result<()> {
             }
         }
         Command::Linear {
-            command: LinearCommand::Reconcile { config, dry_run },
+            command: LinearCommand::Reconcile { dry_run },
         } => {
             if !dry_run {
                 anyhow::bail!("Linear reconciliation is read-only in Sprint 03; pass --dry-run");
             }
-            linear_reconcile(load_config(config)?).await?;
+            linear_reconcile(load_config(config_override.as_deref(), system)?).await?;
         }
         Command::GitHub {
-            command: GitHubCommand::Reconcile { config },
-        } => github_reconcile(load_config(config)?).await?,
+            command: GitHubCommand::Reconcile,
+        } => github_reconcile(load_config(config_override.as_deref(), system)?).await?,
         Command::Scheduler {
-            command: SchedulerCommand::Once { config, dry_run },
+            command: SchedulerCommand::Once { dry_run },
         } => {
             if !dry_run {
                 anyhow::bail!(
                     "scheduler dispatch remains dry-run-only in Sprint 04; pass --dry-run"
                 );
             }
-            let config = load_config(config)?;
+            let config = load_config(config_override.as_deref(), system)?;
             let database = SqliteDatabase::initialize(
                 &config.config.runtime.database_path,
                 config.config.runtime.database_max_connections,
@@ -340,9 +391,9 @@ async fn main() -> Result<()> {
             )?;
         }
         Command::Scheduler {
-            command: SchedulerCommand::CapacityShow { config },
+            command: SchedulerCommand::CapacityShow,
         } => {
-            let config = load_config(config)?;
+            let config = load_config(config_override.as_deref(), system)?;
             let database = SqliteDatabase::initialize(
                 &config.config.runtime.database_path,
                 config.config.runtime.database_max_connections,
@@ -354,9 +405,9 @@ async fn main() -> Result<()> {
             )?;
         }
         Command::Scheduler {
-            command: SchedulerCommand::Explain { config, issue },
+            command: SchedulerCommand::Explain { issue },
         } => {
-            let config = load_config(config)?;
+            let config = load_config(config_override.as_deref(), system)?;
             let database = SqliteDatabase::initialize(
                 &config.config.runtime.database_path,
                 config.config.runtime.database_max_connections,
@@ -384,7 +435,7 @@ async fn main() -> Result<()> {
                 &serde_json::json!({"fixture_ticket": fixture_ticket, "dry_linear": true, "dry_github": true, "runner": "disabled_pending_captured_provider_fixtures", "started": false}),
             )?;
         }
-        Command::Serve { config } => serve(load_config(config)?).await?,
+        Command::Serve => serve(load_config(config_override.as_deref(), system)?).await?,
     }
     Ok(())
 }
@@ -625,9 +676,148 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
-fn load_config(path: PathBuf) -> Result<ValidatedConfig> {
-    Config::from_path(&path)
-        .with_context(|| format!("failed to load configuration {}", path.display()))?
+fn resolve_runtime_paths(
+    config: Option<&std::path::Path>,
+    system: bool,
+) -> Result<spire_application::ResolvedPaths> {
+    runtime_paths::resolve_paths(config, system, &runtime_paths::process_environment())
+}
+
+fn print_paths(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Text => {
+            println!("profile: {:?}", paths.profile);
+            println!("config: {}", paths.config_file.display());
+            println!("data: {}", paths.data_root.display());
+            println!("state: {}", paths.state_root.display());
+            println!("cache: {}", paths.cache_root.display());
+        }
+        OutputFormat::Json => print_json(&paths)?,
+    }
+    Ok(())
+}
+
+fn config_show(
+    config: Option<&std::path::Path>,
+    system: bool,
+    effective: bool,
+    _redacted: bool,
+) -> Result<()> {
+    let paths = resolve_runtime_paths(config, system)?;
+    let input = fs::read_to_string(&paths.config_file).with_context(|| {
+        format!(
+            "failed to read configuration {}",
+            paths.config_file.display()
+        )
+    })?;
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(&input)
+        .context("failed to parse configuration YAML for redacted display")?;
+    redact_yaml(&mut value);
+    if effective {
+        let mut output = serde_yaml::Mapping::new();
+        output.insert(
+            serde_yaml::Value::String("configuration_path".to_owned()),
+            serde_yaml::Value::String(paths.config_file.display().to_string()),
+        );
+        output.insert(serde_yaml::Value::String("configuration".to_owned()), value);
+        println!("{}", serde_yaml::to_string(&output)?);
+    } else {
+        println!("{}", serde_yaml::to_string(&value)?);
+    }
+    Ok(())
+}
+
+fn config_migrate(from: &std::path::Path, write: bool) -> Result<()> {
+    let input = fs::read_to_string(from)
+        .with_context(|| format!("failed to read schema 3 configuration {}", from.display()))?;
+    let preview = spire_application::preview_schema3_migration(&input)
+        .context("configuration migration stopped without changing any file")?;
+    let migrated = serde_yaml::to_string(&preview.configuration)?;
+    if write {
+        atomic_replace_with_backup(from, migrated.as_bytes())?;
+        println!("configuration migrated in place: {}", from.display());
+    } else {
+        let mut redacted = preview.configuration.clone();
+        redact_yaml(&mut redacted);
+        print_json(&serde_json::json!({
+            "write": false,
+            "from_schema_version": preview.from_schema_version,
+            "to_schema_version": preview.to_schema_version,
+            "deferred_fields": preview.deferred_fields,
+            "configuration": serde_yaml::to_string(&redacted)?,
+        }))?;
+    }
+    Ok(())
+}
+
+fn atomic_replace_with_backup(path: &std::path::Path, content: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("configuration file must have a parent directory")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("configuration path must have a UTF-8 file name")?;
+    let timestamp = unix_now();
+    let backup = parent.join(format!("{file_name}.before-schema4-{timestamp}.bak"));
+    fs::copy(path, &backup)
+        .with_context(|| format!("failed to create migration backup {}", backup.display()))?;
+    let temporary = parent.join(format!(".{file_name}.schema4-{timestamp}.tmp"));
+    let write_result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| {
+                format!(
+                    "failed to create temporary configuration {}",
+                    temporary.display()
+                )
+            })?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)
+            .with_context(|| format!("failed to atomically replace {}", path.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+fn redact_yaml(value: &mut serde_yaml::Value) {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, value) in mapping {
+                let sensitive = key.as_str().is_some_and(|name| {
+                    let name = name.to_ascii_lowercase();
+                    name.contains("secret")
+                        || name.contains("credential")
+                        || name.contains("token")
+                        || name.contains("password")
+                });
+                if sensitive {
+                    *value = serde_yaml::Value::String("REDACTED".to_owned());
+                } else {
+                    redact_yaml(value);
+                }
+            }
+        }
+        serde_yaml::Value::Sequence(values) => values.iter_mut().for_each(redact_yaml),
+        _ => {}
+    }
+}
+
+fn load_config(config: Option<&std::path::Path>, system: bool) -> Result<ValidatedConfig> {
+    let paths = resolve_runtime_paths(config, system)?;
+    Config::from_path(&paths.config_file)
+        .with_context(|| {
+            format!(
+                "failed to load configuration {}",
+                paths.config_file.display()
+            )
+        })?
         .validate()
         .context("configuration validation failed")
 }
