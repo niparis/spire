@@ -161,12 +161,32 @@ grep -Fq 'BINARY: ${{ steps.package.outputs.binary }}' "${release_workflow}" || 
   exit 1
 }
 
+publication_job="$(
+  awk '
+    /^  publish:/ { active = 1 }
+    /^  smoke:/ { active = 0 }
+    active { print }
+  ' "${release_workflow}"
+)"
+grep -Fq 'environment: release' <<<"${publication_job}" || {
+  printf 'publication job must retain the protected release environment\n' >&2
+  exit 1
+}
+[[ "$(grep -c '^    environment: release$' "${release_workflow}")" == 1 ]] || {
+  printf 'release workflow must contain exactly one protected environment gate\n' >&2
+  exit 1
+}
+
 promotion_job="$(
   awk '
     /^  promote_latest:/ { active = 1 }
     active { print }
   ' "${release_workflow}"
 )"
+if grep -Fq 'environment: release' <<<"${promotion_job}"; then
+  printf 'latest promotion must run automatically after public smoke tests\n' >&2
+  exit 1
+fi
 checkout_line="$(
   grep -n -m1 'uses: actions/checkout@' <<<"${promotion_job}" | cut -d: -f1
 )"
