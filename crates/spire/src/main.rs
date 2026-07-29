@@ -37,7 +37,11 @@ use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(name = "spire", about = "Single-node Code Harness orchestrator")]
+#[command(
+    name = "spire",
+    about = "Single-node Code Harness orchestrator",
+    version
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
