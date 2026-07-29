@@ -12,7 +12,9 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use spire_application::{
-    CanonicalIssuePage, CanonicalLinearIssue, ExternalResult, LinearReadPort, RelevantIssueQuery,
+    AuthenticationState, CanonicalIssuePage, CanonicalLinearIssue, ExternalResult, LinearReadPort,
+    ProbeConfidence, RelevantIssueQuery, ServiceAuthenticationProbe,
+    ServiceAuthenticationProbePort,
 };
 use spire_domain::LinearIssueId;
 use thiserror::Error;
@@ -207,6 +209,70 @@ impl LinearReadPort for LinearReadAdapter {
         query: &RelevantIssueQuery,
     ) -> Result<ExternalResult<CanonicalIssuePage>, Self::Error> {
         Ok(ExternalResult::Confirmed(self.issues(query).await?))
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl ServiceAuthenticationProbePort for LinearReadAdapter {
+    type Error = LinearAdapterError;
+
+    async fn probe_service(
+        &self,
+        service: &str,
+    ) -> Result<ServiceAuthenticationProbe, Self::Error> {
+        let (state, identity, confidence, remediation) = match self.verify_viewer().await {
+            Ok(identity) => (
+                AuthenticationState::Authenticated,
+                Some(format!(
+                    "viewer:{} organization:{}",
+                    identity.viewer_id, identity.organization_id
+                )),
+                ProbeConfidence::Confirmed,
+                None,
+            ),
+            Err(LinearAdapterError::Authentication) => (
+                AuthenticationState::Expired,
+                None,
+                ProbeConfidence::Confirmed,
+                Some("run spire auth rotate linear".into()),
+            ),
+            Err(LinearAdapterError::PermissionDenied) => (
+                AuthenticationState::PermissionDenied,
+                None,
+                ProbeConfidence::Confirmed,
+                Some("replace the Linear API key with one authorized for the configured workspace".into()),
+            ),
+            Err(LinearAdapterError::RateLimited { .. } | LinearAdapterError::Network) => (
+                AuthenticationState::Unavailable,
+                None,
+                ProbeConfidence::Inferred,
+                Some("retry the Linear authentication probe after provider recovery".into()),
+            ),
+            Err(
+                LinearAdapterError::AmbiguousAuthentication
+                | LinearAdapterError::MalformedResponse
+                | LinearAdapterError::ResponseTooLarge
+                | LinearAdapterError::Http(_)
+                | LinearAdapterError::ClientConstruction
+                | LinearAdapterError::CredentialUnavailable
+                | LinearAdapterError::InvalidCredentialReference,
+            ) => (
+                AuthenticationState::Ambiguous,
+                None,
+                ProbeConfidence::Unknown,
+                Some("update the captured Linear authentication fixture before trusting this response".into()),
+            ),
+        };
+        Ok(ServiceAuthenticationProbe {
+            service: service.into(),
+            state,
+            identity,
+            expires_at: None,
+            permissions: Vec::new(),
+            missing_permissions: Vec::new(),
+            confidence,
+            remediation,
+        })
     }
 }
 
