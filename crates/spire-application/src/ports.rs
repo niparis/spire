@@ -43,38 +43,7 @@ pub struct WorkflowConfiguration {
     pub workflow_state_ids: Vec<String>,
 }
 
-pub trait LinearPort {
-    type Error;
-
-    fn get_issue(
-        &self,
-        issue_id: &LinearIssueId,
-    ) -> Result<ExternalResult<CanonicalIssue>, Self::Error>;
-    fn find_relevant_issues(
-        &self,
-        query: &RelevantIssueQuery,
-    ) -> Result<ExternalResult<IssuePage>, Self::Error>;
-    fn transition_issue(
-        &self,
-        issue_id: &LinearIssueId,
-        expected_version: &ExpectedVersion,
-        target_state_id: &str,
-        idempotency_key: &IdempotencyKey,
-    ) -> Result<ExternalResult<()>, Self::Error>;
-    fn post_comment(
-        &self,
-        issue_id: &LinearIssueId,
-        idempotency_key: &IdempotencyKey,
-        body: &str,
-    ) -> Result<ExternalResult<()>, Self::Error>;
-    fn get_workflow_configuration(
-        &self,
-        team_id: &str,
-    ) -> Result<ExternalResult<WorkflowConfiguration>, Self::Error>;
-}
-
-/// Read-only Linear boundary used by reconciliation. Mutation methods remain on
-/// `LinearPort` for the later, explicitly authorized automation sprint.
+/// Read-only Linear boundary used by ingestion and reconciliation.
 #[allow(async_fn_in_trait)]
 pub trait LinearReadPort {
     type Error;
@@ -88,6 +57,60 @@ pub trait LinearReadPort {
         &self,
         query: &RelevantIssueQuery,
     ) -> Result<ExternalResult<CanonicalIssuePage>, Self::Error>;
+}
+
+/// Mutating Linear boundary. It is a separate port from `LinearReadPort` so a
+/// build, a command, or a test can hold read authority without write authority.
+///
+/// Every operation is conditional and idempotent: transitions carry the state
+/// the caller expects to overwrite, and comments carry a stable idempotency key.
+#[allow(async_fn_in_trait)]
+pub trait LinearWritePort {
+    type Error;
+
+    /// Applies a workflow transition only when Linear still reports
+    /// `expected_state_id`. Returns `Ambiguous` when a human moved the ticket.
+    async fn transition_issue(
+        &self,
+        issue_id: &LinearIssueId,
+        expected_state_id: &str,
+        target_state_id: &str,
+    ) -> Result<ExternalResult<TransitionApplied>, Self::Error>;
+
+    /// Publishes a comment at most once. The marker is searched for first, so a
+    /// replayed outbox action re-uses the existing comment.
+    async fn publish_comment(
+        &self,
+        issue_id: &LinearIssueId,
+        idempotency_key: &IdempotencyKey,
+        marker: &str,
+        body: &str,
+    ) -> Result<ExternalResult<PublishedComment>, Self::Error>;
+
+    /// Reports whether the configured webhook still exists and is enabled.
+    async fn webhook_configuration(
+        &self,
+        webhook_id: &str,
+    ) -> Result<ExternalResult<WebhookConfigurationStatus>, Self::Error>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransitionApplied {
+    pub applied: bool,
+    pub observed_state_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedComment {
+    pub external_id: String,
+    pub already_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookConfigurationStatus {
+    pub webhook_id: String,
+    pub enabled: bool,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, fs, net::SocketAddr, path::PathBuf};
 
-use crate::RepositoryMapping;
+use crate::{LinearStateKind, RepositoryMapping, RolloutGate, WebhookLimits};
 use serde::Deserialize;
 use spire_domain::{
     ComplexityClass, ComplexityEstimate, DispatchCandidate, DispatchPolicy, DispatchPolicyError,
@@ -22,6 +22,8 @@ pub struct Config {
     pub security: SecurityConfig,
     pub runtime: RuntimeConfig,
     pub server: ServerConfig,
+    pub webhook: WebhookConfig,
+    pub rollout: RolloutConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,6 +133,31 @@ pub struct ServerConfig {
     pub admin_bind: SocketAddr,
 }
 
+/// Public signed-ingress boundary. Every limit here is enforced before the raw
+/// body is parsed, so an unauthenticated caller cannot make the process work.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookConfig {
+    pub path: String,
+    pub signing_secret_ref: String,
+    pub webhook_id: String,
+    pub replay_window_seconds: u64,
+    pub max_body_bytes: usize,
+}
+
+/// Restricted-rollout gates. Automation stays inert until an operator sets
+/// `linear_writes_enabled` and names every allowlisted team, repository, and
+/// work type.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RolloutConfig {
+    pub linear_writes_enabled: bool,
+    pub allowed_team_ids: Vec<String>,
+    pub allowed_repositories: Vec<String>,
+    pub allowed_type_labels: Vec<String>,
+    pub max_active_harness_runs: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct ValidatedConfig {
     pub config: Config,
@@ -147,7 +174,7 @@ pub enum ConfigError {
     },
     #[error("invalid configuration YAML: {0}")]
     Parse(#[from] serde_yaml::Error),
-    #[error("configuration schema_version must be 1")]
+    #[error("configuration schema_version must be {SCHEMA_VERSION}")]
     UnsupportedSchemaVersion,
     #[error("configuration value {path} is missing or is still a placeholder")]
     MissingValue { path: String },
@@ -155,6 +182,12 @@ pub enum ConfigError {
     InvalidCredentialReference { path: String },
     #[error("configuration value {path} must be greater than zero")]
     MustBePositive { path: String },
+    #[error("configuration value {path} is outside the supported range: {detail}")]
+    OutOfRange { path: String, detail: String },
+    #[error("webhook.path must be an absolute path that does not shadow /health or /admin")]
+    WebhookPathInvalid,
+    #[error("rollout gate {path} is inconsistent: {detail}")]
+    RolloutInconsistent { path: String, detail: String },
     #[error("runtime path {path} must be absolute")]
     RelativePath { path: String },
     #[error("runtime paths must be distinct: {first} and {second}")]
@@ -169,6 +202,76 @@ pub enum ConfigError {
     Dispatch(#[from] DispatchPolicyError),
     #[error("invalid domain value at {path}: {message}")]
     Domain { path: String, message: String },
+}
+
+/// The only configuration schema this build accepts. Sprint 06 added the signed
+/// ingress and restricted-rollout sections, so a Sprint 05 file must be edited
+/// rather than silently reinterpreted.
+pub const SCHEMA_VERSION: u32 = 2;
+const MAX_WEBHOOK_BODY_BYTES: usize = 1_048_576;
+const MAX_REPLAY_WINDOW_SECONDS: u64 = 600;
+
+impl LinearConfig {
+    /// Resolves a projected lifecycle status to its configured workflow-state ID.
+    /// Linear writes always address states by ID, never by human-visible name.
+    pub fn state_id(&self, kind: LinearStateKind) -> &str {
+        match kind {
+            LinearStateKind::Ready => &self.ready_state_id,
+            LinearStateKind::InProgress => &self.in_progress_state_id,
+            LinearStateKind::InReview => &self.in_review_state_id,
+            LinearStateKind::SpecsNeeded => &self.specs_needed_state_id,
+            LinearStateKind::Blocked => &self.blocked_state_id,
+            LinearStateKind::Done => &self.done_state_id,
+            LinearStateKind::Canceled => &self.canceled_state_id,
+        }
+    }
+
+    /// Names the state an ID belongs to, so operator output never has to guess.
+    pub fn state_kind(&self, state_id: &str) -> Option<LinearStateKind> {
+        LinearStateKind::ALL
+            .into_iter()
+            .find(|kind| self.state_id(*kind) == state_id)
+    }
+}
+
+impl ValidatedConfig {
+    pub fn webhook_limits(&self) -> WebhookLimits {
+        WebhookLimits {
+            max_body_bytes: self.config.webhook.max_body_bytes,
+            replay_window_seconds: self.config.webhook.replay_window_seconds,
+        }
+    }
+
+    /// Builds the rollout gate from configuration. The runtime kill switch lives
+    /// in the database, so it is supplied separately by the caller.
+    pub fn rollout_gate(&self, kill_switch_engaged: bool) -> RolloutGate {
+        RolloutGate {
+            linear_writes_enabled: self.config.rollout.linear_writes_enabled,
+            kill_switch_engaged,
+            allowed_team_ids: self
+                .config
+                .rollout
+                .allowed_team_ids
+                .iter()
+                .cloned()
+                .collect(),
+            allowed_repositories: self
+                .config
+                .rollout
+                .allowed_repositories
+                .iter()
+                .cloned()
+                .collect(),
+            allowed_type_labels: self
+                .config
+                .rollout
+                .allowed_type_labels
+                .iter()
+                .cloned()
+                .collect(),
+            max_active_harness_runs: self.config.rollout.max_active_harness_runs,
+        }
+    }
 }
 
 impl Config {
@@ -186,7 +289,7 @@ impl Config {
     }
 
     pub fn validate(self) -> Result<ValidatedConfig, ConfigError> {
-        if self.schema_version != 1 {
+        if self.schema_version != SCHEMA_VERSION {
             return Err(ConfigError::UnsupportedSchemaVersion);
         }
         for (path, value) in [
@@ -238,15 +341,21 @@ impl Config {
                 "security.maker_push_mode",
                 self.security.maker_push_mode.as_str(),
             ),
+            ("webhook.webhook_id", self.webhook.webhook_id.as_str()),
         ] {
             ensure_value(path, value)?;
         }
         for (path, reference) in [
             ("linear.credential_ref", self.linear.credential_ref.as_str()),
             ("github.credential_ref", self.github.credential_ref.as_str()),
+            (
+                "webhook.signing_secret_ref",
+                self.webhook.signing_secret_ref.as_str(),
+            ),
         ] {
             ensure_credential_reference(path, reference)?;
         }
+        validate_webhook(&self.webhook)?;
         if self.linear.complexity_mapping.is_empty() {
             return Err(ConfigError::MissingValue {
                 path: "linear.complexity_mapping".to_owned(),
@@ -299,6 +408,7 @@ impl Config {
                         .to_owned(),
             });
         }
+        validate_rollout(&self.rollout, &self.linear, &self.concurrency)?;
         if self.security.reviewer_can_push {
             return Err(ConfigError::ReviewerCanPush);
         }
@@ -397,6 +507,101 @@ fn ensure_credential_reference(path: &str, reference: &str) -> Result<(), Config
     })
 }
 
+fn validate_webhook(webhook: &WebhookConfig) -> Result<(), ConfigError> {
+    let path = webhook.path.as_str();
+    if !path.starts_with('/')
+        || path.len() < 2
+        || path.contains(['?', '#', ' '])
+        || path.starts_with("/health")
+        || path.starts_with("/admin")
+    {
+        return Err(ConfigError::WebhookPathInvalid);
+    }
+    if webhook.replay_window_seconds == 0 || webhook.max_body_bytes == 0 {
+        return Err(ConfigError::MustBePositive {
+            path: "webhook.replay_window_seconds/max_body_bytes".to_owned(),
+        });
+    }
+    if webhook.replay_window_seconds > MAX_REPLAY_WINDOW_SECONDS {
+        return Err(ConfigError::OutOfRange {
+            path: "webhook.replay_window_seconds".to_owned(),
+            detail: format!("must not exceed {MAX_REPLAY_WINDOW_SECONDS} seconds"),
+        });
+    }
+    if webhook.max_body_bytes > MAX_WEBHOOK_BODY_BYTES {
+        return Err(ConfigError::OutOfRange {
+            path: "webhook.max_body_bytes".to_owned(),
+            detail: format!("must not exceed {MAX_WEBHOOK_BODY_BYTES} bytes"),
+        });
+    }
+    Ok(())
+}
+
+/// The rollout gate fails closed: enabling Linear writes requires an explicit
+/// allowlist for every dimension the pilot restricts.
+fn validate_rollout(
+    rollout: &RolloutConfig,
+    linear: &LinearConfig,
+    concurrency: &ConcurrencyConfig,
+) -> Result<(), ConfigError> {
+    if rollout.max_active_harness_runs == 0 {
+        return Err(ConfigError::MustBePositive {
+            path: "rollout.max_active_harness_runs".to_owned(),
+        });
+    }
+    if rollout.max_active_harness_runs > concurrency.total_active_harness_runs {
+        return Err(ConfigError::RolloutInconsistent {
+            path: "rollout.max_active_harness_runs".to_owned(),
+            detail: "must not exceed concurrency.total_active_harness_runs".to_owned(),
+        });
+    }
+    if !rollout.linear_writes_enabled {
+        return Ok(());
+    }
+    for (path, values) in [
+        ("rollout.allowed_team_ids", &rollout.allowed_team_ids),
+        (
+            "rollout.allowed_repositories",
+            &rollout.allowed_repositories,
+        ),
+        ("rollout.allowed_type_labels", &rollout.allowed_type_labels),
+    ] {
+        if values.is_empty() {
+            return Err(ConfigError::RolloutInconsistent {
+                path: path.to_owned(),
+                detail: "must not be empty while linear_writes_enabled is true".to_owned(),
+            });
+        }
+    }
+    if !rollout.allowed_team_ids.contains(&linear.team_id) {
+        return Err(ConfigError::RolloutInconsistent {
+            path: "rollout.allowed_team_ids".to_owned(),
+            detail: "must contain linear.team_id".to_owned(),
+        });
+    }
+    for repository in &rollout.allowed_repositories {
+        if !linear
+            .repository_mappings
+            .iter()
+            .any(|mapping| mapping.repository.as_str() == repository.as_str() && mapping.enabled)
+        {
+            return Err(ConfigError::RolloutInconsistent {
+                path: "rollout.allowed_repositories".to_owned(),
+                detail: format!("{repository} is not an enabled linear.repository_mappings entry"),
+            });
+        }
+    }
+    for label in &rollout.allowed_type_labels {
+        if !linear.supported_type_labels.contains(label) {
+            return Err(ConfigError::RolloutInconsistent {
+                path: "rollout.allowed_type_labels".to_owned(),
+                detail: format!("{label} is not in linear.supported_type_labels"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_runtime_paths(runtime: &RuntimeConfig) -> Result<(), ConfigError> {
     let paths = [
         ("runtime.database_path", &runtime.database_path),
@@ -446,7 +651,7 @@ mod tests {
     use super::*;
 
     const VALID_CONFIG: &str = r#"
-schema_version: 1
+schema_version: 2
 linear:
   organization_id: org
   team_id: team
@@ -489,20 +694,100 @@ concurrency: {total_active_harness_runs: 3, ai_initiated_active_harness_runs: 1,
 security: {admin_access: loopback, maker_push_mode: mechanical_publisher, reviewer_can_push: false, credential_can_merge: false}
 runtime: {database_path: /var/lib/spire/data/spire.db, database_max_connections: 4, data_root: /var/lib/spire/data, backup_root: /var/lib/spire/backups, workspace_root: /var/lib/spire/workspaces, evidence_root: /var/lib/spire/evidence, implementation_timeout_seconds: 7200, review_timeout_seconds: 1800}
 server: {api_bind: 127.0.0.1:8080, admin_bind: 127.0.0.1:8081}
+webhook: {path: /webhooks/linear, signing_secret_ref: systemd:credentials/linear-webhook-secret, webhook_id: webhook, replay_window_seconds: 60, max_body_bytes: 262144}
+rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositories: [], allowed_type_labels: [], max_active_harness_runs: 1}
 "#;
+
+    fn enabled_rollout() -> String {
+        VALID_CONFIG.replace(
+            "rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositories: [], allowed_type_labels: [], max_active_harness_runs: 1}",
+            "rollout: {linear_writes_enabled: true, allowed_team_ids: [team], allowed_repositories: [owner/spire], allowed_type_labels: [type:bug], max_active_harness_runs: 1}",
+        )
+    }
 
     #[test]
     fn validates_complete_provider_neutral_config() {
-        assert!(Config::from_yaml(VALID_CONFIG).unwrap().validate().is_ok());
+        let config = Config::from_yaml(VALID_CONFIG).unwrap().validate().unwrap();
+        assert_eq!(config.webhook_limits().replay_window_seconds, 60);
+        assert!(!config.rollout_gate(false).linear_writes_enabled);
+        assert_eq!(
+            config.config.linear.state_id(LinearStateKind::InProgress),
+            "progress"
+        );
+        assert_eq!(
+            config.config.linear.state_kind("review"),
+            Some(LinearStateKind::InReview)
+        );
     }
 
     #[test]
     fn rejects_unknown_keys_and_empty_policy() {
-        assert!(Config::from_yaml("schema_version: 1\nunknown: value").is_err());
+        assert!(Config::from_yaml("schema_version: 2\nunknown: value").is_err());
         let invalid = VALID_CONFIG.replace("policy_version: 1", "policy_version: 0");
         assert!(matches!(
             Config::from_yaml(&invalid).unwrap().validate(),
             Err(ConfigError::Domain { .. })
         ));
+        let invalid = VALID_CONFIG.replace("schema_version: 2", "schema_version: 1");
+        assert!(matches!(
+            Config::from_yaml(&invalid).unwrap().validate(),
+            Err(ConfigError::UnsupportedSchemaVersion)
+        ));
+    }
+
+    #[test]
+    fn webhook_ingress_limits_fail_closed() {
+        for (from, to) in [
+            ("path: /webhooks/linear", "path: /admin/webhooks"),
+            ("path: /webhooks/linear", "path: webhooks/linear"),
+            ("replay_window_seconds: 60", "replay_window_seconds: 0"),
+            ("replay_window_seconds: 60", "replay_window_seconds: 3600"),
+            ("max_body_bytes: 262144", "max_body_bytes: 8388608"),
+            (
+                "signing_secret_ref: systemd:credentials/linear-webhook-secret",
+                "signing_secret_ref: /etc/spire/secret",
+            ),
+        ] {
+            let invalid = VALID_CONFIG.replace(from, to);
+            assert!(
+                Config::from_yaml(&invalid).unwrap().validate().is_err(),
+                "{to} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn enabling_linear_writes_requires_a_consistent_allowlist() {
+        assert!(
+            Config::from_yaml(&enabled_rollout())
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        for (from, to) in [
+            ("allowed_team_ids: [team]", "allowed_team_ids: [other-team]"),
+            (
+                "allowed_repositories: [owner/spire]",
+                "allowed_repositories: []",
+            ),
+            (
+                "allowed_repositories: [owner/spire]",
+                "allowed_repositories: [owner/other]",
+            ),
+            (
+                "allowed_type_labels: [type:bug]",
+                "allowed_type_labels: [type:chore]",
+            ),
+            ("max_active_harness_runs: 1}", "max_active_harness_runs: 9}"),
+        ] {
+            let invalid = enabled_rollout().replace(from, to);
+            assert!(
+                matches!(
+                    Config::from_yaml(&invalid).unwrap().validate(),
+                    Err(ConfigError::RolloutInconsistent { .. })
+                ),
+                "{to} must be rejected"
+            );
+        }
     }
 }
