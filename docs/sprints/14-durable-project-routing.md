@@ -1,4 +1,4 @@
-# Sprint 14 — Durable Linear Project Routing
+# Sprint 14 — Durable Project Routing and Worktree Sources
 
 **Last Verified:** 2026-07-29
 **Depends on:** Sprint 13 exit criteria
@@ -7,21 +7,21 @@
 ## Outcome
 
 Linear-project-to-Git-repository mappings become durable SQLite state and the sole
-repository-routing authority for new work. The Linear adapter includes stable
-project identity in its canonical issue projection, eligibility resolves enabled
-mappings through an application port, and mapping changes are auditable and do not
-reroute active work.
+repository-routing authority for new work. Each mapping registers the repository
+source and Git common directory from which Spire allocates owned worktrees.
+The Linear adapter includes stable project identity in its canonical issue
+projection, eligibility resolves enabled mappings through an application port,
+and mapping changes are auditable and do not reroute active work.
 
 This sprint maps existing Linear projects only. It does not create a Linear project
-or enable production automation.
+or enable production automation. It also implements the accepted worktree-first
+decision as a forward change from the directory-only allocator delivered earlier.
 
 ## Entry criteria
 
 - Linear and GitHub authentication diagnostics pass.
 - SQLite backup/restore is proven for the current schema.
 - The target Linear fixture confirms how project identity appears on an issue.
-- The repository source model—operator-owned checkout or Spire-managed base
-  clone—is selected and recorded in the implementation design.
 - Existing schema 3 label mappings and active work have been inventoried without
   reading or migrating `LEGACY/`.
 
@@ -100,7 +100,8 @@ linear_team_id
 linear_project_id
 linear_project_name_snapshot
 github_repository
-local_repository_path
+repository_source_path
+git_common_directory
 git_remote_url
 default_branch
 status
@@ -214,12 +215,14 @@ Implementation:
 
 1. List and select existing Linear projects through a read-only adapter.
 2. Resolve local Git path, remote, canonical GitHub repository, and default branch.
-3. `map` presents the complete proposed mapping before commit.
-4. `disable` stops new admission immediately.
-5. `remove` writes a tombstone and requires a reason.
-6. `doctor` verifies Linear project existence, GitHub repository identity, local
-   path, remote, default branch, and Git access.
-7. Support stable JSON output for automation.
+3. Resolve and persist its Git common directory as the worktree source.
+4. `map` presents the complete proposed mapping before commit.
+5. `disable` stops new admission immediately.
+6. `remove` writes a tombstone and requires a reason.
+7. `doctor` verifies Linear project existence, GitHub repository identity,
+   repository source, Git common directory, remote, default branch, and Git
+   worktree capability.
+8. Support stable JSON output for automation.
 
 Verification:
 
@@ -246,12 +249,101 @@ Verification:
 - Transient provider failure does not tombstone a mapping.
 - Renames are distinguished from identity changes.
 
+### S14.9 Migrate workspace ownership and allocate maker worktrees
+
+Add `0008_worktree_ownership.sql` after
+`0007_project_repository_mappings.sql`. Extend workspace persistence with at
+least:
+
+```text
+kind
+root_run_id
+review_cycle_id
+repository_source_path
+git_common_directory
+base_sha
+head_sha
+branch
+allocation_state
+```
+
+`branch` is nullable for detached review workspaces. Existing rows retain their
+historical identity and are not silently asserted to be Git-recognized
+worktrees.
+
+Implementation:
+
+1. Replace the directory-only workspace allocator with a Git-aware adapter behind
+   the application-owned workspace port.
+2. Persist allocation intent in `allocating` state before Git or filesystem IO;
+   never hold a SQLite transaction across either.
+3. Derive the maker branch as
+   `spire/<sanitized-linear-identifier>-<root-run-short-id>` from bounded,
+   validated value objects.
+4. Allocate one maker branch and worktree per root attempt from the mapped
+   repository source and recorded base SHA.
+5. Record the source path, Git common directory, base SHA, branch, path,
+   ownership marker, and lifecycle state.
+6. Reuse the root attempt's maker workspace for same-harness continuations and
+   CI/review corrections.
+7. Never switch, reset, clean, or edit the registered source checkout.
+8. On recovery, adopt only when SQLite, the exact ownership marker, filesystem
+   path, and `git worktree list --porcelain` agree; otherwise quarantine.
+
+Verification:
+
+- Migration succeeds from every supported existing schema and does not rewrite
+  applied migrations.
+- Concurrent allocation cannot reuse a branch or path.
+- Linear titles, descriptions, labels, and project names cannot enter a branch or
+  path.
+- Allocation leaves dirty, detached, and linked registered source checkouts
+  unchanged.
+- Child runs reuse the root maker workspace; a new root attempt receives a new
+  branch/worktree.
+- Crash tests cover intent before Git, Git success before marker, marker before
+  ready state, and exact-match recovery.
+- Directory-only, foreign, symlink-escaped, and metadata-mismatched paths are
+  rejected or quarantined.
+
+### S14.10 Allocate reviewer worktrees and migrate cleanup
+
+Implementation:
+
+1. Allocate each review cycle a separate worktree detached at the exact current
+   CI-green head SHA.
+2. Do not expose or reuse the maker worktree and do not create a reviewer branch.
+3. Bind the workspace record and ownership marker to the review cycle and reviewed
+   SHA.
+4. Detect tracked or untracked reviewer changes after execution and fail the
+   review contract.
+5. Before cleanup, prove terminal retention, no live Run/lease/unit/review cycle,
+   an in-root path, an exact marker, and matching SQLite/Git metadata.
+6. Remove an owned worktree with `git worktree remove` and perform only bounded
+   metadata pruning.
+7. Keep worktree removal separate from branch deletion; never delete a branch
+   needed by an open PR.
+8. Quarantine ambiguous or partially removed state for operator inspection.
+
+Verification:
+
+- Review allocation is detached at the requested SHA and cannot observe maker
+  uncommitted state.
+- A new head SHA receives a new review workspace; a stale SHA cannot be approved.
+- Reviewer mutation, push attempts, and workspace reuse fail closed.
+- Active, foreign, unowned, mismatched, source-checkout, Git-common-directory, and
+  out-of-root paths are never removed.
+- Cleanup and recovery converge after crashes before removal, after Git removal,
+  and before terminal state persistence.
+
 ## Suggested pull-request slices
 
 1. Domain/application contracts and SQLite migration/adapter.
 2. Canonical Linear project projection and routing evaluation.
 3. Schema 3 transition and mapping CLI.
 4. Reconciliation, operations diagnostics, and failure coverage.
+5. Workspace schema migration and Git-aware maker allocation.
+6. Detached reviewer allocation, recovery, and cleanup migration.
 
 ## Sprint demo
 
@@ -262,6 +354,11 @@ mapping, and change the project during a simulated active run. Demonstrate that
 labels never reroute work, new admission stops, and active work remains bound to
 its persisted repository.
 
+Using the mapped repository, allocate a maker worktree without changing the
+registered checkout, reuse it for a child correction, allocate a detached reviewer
+worktree at an exact fixture SHA, simulate each allocation crash window, and
+remove only the owned terminal worktrees through Git-aware cleanup.
+
 ## Exit criteria
 
 - SQLite is the only repository-routing source of truth for new work.
@@ -271,10 +368,15 @@ its persisted repository.
 - Schema 3 label mappings have an explicit non-guessing transition path.
 - Mapping commands and reconciliation make no external mutation.
 - Backup/restore and deterministic failure tests cover the new schema.
+- Maker workspaces are Git-recognized, owned by the root attempt, and recoverable.
+- Review workspaces are separate, detached, exact-SHA, and mutation-detecting.
+- Registered source checkouts remain unchanged and outside cleanup authority.
+- Worktree cleanup is Git-aware, fail-closed, and independent of branch deletion.
 
 ## Evidence Sources
 
 - [`../decisions/first-run-onboarding-and-project-mapping.md`](../decisions/first-run-onboarding-and-project-mapping.md)
+- [`../decisions/worktree-first-workspace-ownership.md`](../decisions/worktree-first-workspace-ownership.md)
 - [`../ai_harness_implementation.md`](../ai_harness_implementation.md)
 - Sprint 03 Linear fixtures and Sprint 02 SQLite operating contract.
 
@@ -283,3 +385,5 @@ its persisted repository.
 - Whether archived Linear projects remain queryable with the selected credentials.
 - Exact GitHub repository rename behavior under the approved API identity.
 - Target-VM behavior for a moved or unmounted selected repository source.
+- Exact Git version and linked-worktree behavior on the target VM.
+- Branch-name maximum length after provider and Git hosting constraints.
