@@ -19,7 +19,7 @@ if [[ -z "${release_tag}" ]]; then
     awk '
       /^\[workspace\.package\]$/ { in_workspace_package = 1; next }
       /^\[/ { in_workspace_package = 0 }
-      in_workspace_package && /^version = "[0-9]+\.[0-9]+\.[0-9]+"$/ {
+      in_workspace_package && /^version = "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?"$/ {
         value = $0
         sub(/^version = "/, "", value)
         sub(/"$/, "", value)
@@ -83,16 +83,21 @@ fi
 readonly lockfile_sha256="$(sha256_digest "${repository_root}/Cargo.lock")"
 readonly source_commit="$(git -C "${repository_root}" rev-parse HEAD)"
 readonly rustc_version="$(rustc --version)"
+readonly archive_sha256="$(sha256_digest "${archive_path}")"
+readonly workflow_run_url="${WORKFLOW_RUN_URL:-local://release-package}"
 cat >"${output_directory}/build-metadata.json" <<EOF
 {
   "archive": "${archive_name}",
+  "archive_sha256": "${archive_sha256}",
   "cargo_lock_sha256": "${lockfile_sha256}",
   "release_tag": "${release_tag}",
   "rustc": "${rustc_version}",
   "source_commit": "${source_commit}",
-  "target": "${target}"
+  "target": "${target}",
+  "workflow_run_url": "${workflow_run_url}"
 }
 EOF
+cp "${output_directory}/build-metadata.json" "${output_directory}/release-target-${target}.json"
 
 "${repository_root}/scripts/release/verify-release.sh" \
   "${release_tag}" \

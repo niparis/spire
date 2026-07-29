@@ -20,8 +20,9 @@ Actions artifacts and release assets have deliberately different roles:
 | GitHub Release asset | Immutable, tagged operator distribution | Repository release retention; public only if the repository/release is public | Stable `curl` download target |
 
 This sprint does not introduce package-manager distribution, automatic upgrades,
-container images, cross-platform releases, or changes to the orchestrator's Linear,
-GitHub, or harness authority.
+container images, or changes to the orchestrator's Linear, GitHub, or harness
+authority. Sprint 11A extends this original Linux artifact contract with native macOS
+targets and staged release promotion.
 
 ## Entry criteria
 
@@ -41,12 +42,13 @@ GitHub, or harness authority.
    `Cargo.toml`.
 2. Change every crate to `version.workspace = true`; no crate may carry an independent
    package version while releases are workspace-wide.
-3. Release tags are exactly `v<major>.<minor>.<patch>` and must equal the workspace
-   version with the leading `v` removed. For example, workspace version `0.2.0`
-   requires tag `v0.2.0`.
-4. Until an explicit stability decision, use SemVer `0.y.z`: breaking changes raise
-   `y`; backwards-compatible features raise `z`; fixes raise `z`. When version `1.0.0`
-   is approved, use normal SemVer major/minor/patch rules thereafter.
+3. Release tags are exactly `v<SemVer>` and must equal the workspace version with the
+   leading `v` removed. For example, workspace version `2.0.0-rc.1` requires tag
+   `v2.0.0-rc.1`.
+4. The former Go CLI ended at public `v1.0.3`; this Rust orchestrator is an
+   incompatible generation. The explicit continuity decision is `v2.0.0-rc.1`.
+   It accepts SemVer prerelease identifiers while the release pipeline is proven;
+   stable 2.x releases use normal SemVer major/minor/patch rules.
 5. Only clean, merged commits receive release tags. Development builds must not claim
    a release tag; if a development suffix is introduced later, it must be generated
    from the commit SHA and be visibly distinct from a release version.
@@ -152,9 +154,9 @@ Create `README.md` as a concise operator-facing entry point. It must contain:
    Codex/Claude Code work, plus the no-autonomous-merge boundary.
 2. Links to the architecture, implementation design, sprint roadmap, and operator
    runbooks.
-3. Prerequisites and supported-platform statement: initial binary is Linux x86_64
-   (`x86_64-unknown-linux-musl`); configuration and provider credentials remain
-   operator-owned.
+3. Prerequisites and supported-platform statement: Sprint 11 establishes Linux
+   x86_64 (`x86_64-unknown-linux-musl`); Sprint 11A adds native macOS target
+   validation. Configuration and provider credentials remain operator-owned.
 4. Source verification commands and the canonical CI gates.
 5. A shell-installer command following the standard one-line pattern:
    `curl -LsSf https://github.com/niparis/spire/releases/latest/download/install.sh | sh`.
@@ -165,7 +167,7 @@ Create `README.md` as a concise operator-facing entry point. It must contain:
    Release asset, not an Actions artifact URL:
 
 ```sh
-version=v0.1.0 # replace with the chosen release tag
+version=v2.0.0-rc.1 # replace with the chosen release tag
 base_url="https://github.com/niparis/spire/releases/download/${version}"
 archive="spire-${version}-x86_64-unknown-linux-musl.tar.gz"
 curl --fail --location --remote-name "${base_url}/${archive}"
@@ -245,8 +247,9 @@ matches the tag.
 
 ## Unknown / Unverified
 
-- The initial Linux x86_64 target is proposed; ARM64, macOS, Windows, package
-  managers, containers, and systemd package formats require separate decisions.
+- Linux ARM64, Windows, package managers, containers, and systemd package formats
+  require separate decisions. The Sprint 11A macOS targets remain unverified until
+  their native tag-workflow runs pass.
 - The repository's release visibility must be confirmed before enabling public
   installation guidance. Actions artifacts retain for 14 days.
 - Sigstore/cosign signing and SBOM/provenance attestations are deferred; SHA-256
