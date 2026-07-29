@@ -4,7 +4,7 @@ set -euo pipefail
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly target="${TARGET_TRIPLE:-x86_64-unknown-linux-musl}"
 readonly output_directory="${DIST_DIR:-${repository_root}/dist}"
-readonly release_tag="${RELEASE_TAG:-}"
+release_tag="${RELEASE_TAG:-}"
 
 sha256_digest() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -30,6 +30,7 @@ if [[ -z "${release_tag}" ]]; then
   })"
   release_tag="v${version}"
 fi
+readonly release_tag
 
 "${repository_root}/scripts/release/verify-release.sh" "${release_tag}"
 
