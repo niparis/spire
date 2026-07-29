@@ -75,6 +75,29 @@ version, then follow the [service restart procedure](docs/runbooks/operations-an
 To roll back, reinstall the prior approved tag and follow the
 [recovery and rollback runbook](docs/runbooks/operations-and-pilot.md#recovery-and-rollback).
 
+## User runtime configuration
+
+The default installation is user-scoped: Spire resolves `--config`, then
+`SPIRE_CONFIG`, then XDG configuration, and finally the explicit system profile.
+Use `spire paths --format json` to inspect the effective locations. Schema-3
+configuration is previewed without writes by `spire config migrate --from PATH`;
+add `--write` to create an adjacent backup and atomically replace that file.
+
+After creating a valid schema-4 configuration, preview and explicitly install the
+user service:
+
+```sh
+spire service install
+spire service install --yes
+spire start
+spire status
+```
+
+Codex and Claude Code run with the login user's existing provider-native
+authentication. The user service does not enable lingering itself; if status after
+logout/reboot is required, follow the exact `loginctl enable-linger` action printed
+by installation. `--system` remains a separate, privileged profile.
+
 ## Build and verify from source
 
 Spire uses the Rust toolchain pinned in [rust-toolchain.toml](rust-toolchain.toml).

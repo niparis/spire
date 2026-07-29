@@ -278,6 +278,10 @@ remains disabled and no provider API is called.
 ## Unknown / Unverified
 
 - Exact supported distribution and user-systemd version.
-- Whether `spire start` should install a missing unit or require
-  `spire service install` first.
-- The approved initial fallback-candidate policy.
+- `spire start` requires a prior explicit `spire service install --yes`; it does
+  not create a unit implicitly.
+- A minimal primary maker/reviewer pair is accepted at first run. Ordered
+  fallbacks remain optional advanced configuration.
+- User-systemd start, stop, logout, and reboot persistence still require target
+  VM evidence; installation reports the required `loginctl enable-linger` action
+  but never invokes it.
