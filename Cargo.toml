@@ -22,6 +22,7 @@ serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 hex = "0.4.3"
+hmac = "0.12.1"
 lineark-sdk = "=3.0.3"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite"] }
