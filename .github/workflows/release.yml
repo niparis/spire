@@ -91,14 +91,19 @@ jobs:
         if: matrix.setup == 'linux-musl'
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
 
-      - name: Package and verify the native target
+      - name: Package the native target
         id: package
         env:
           TARGET_TRIPLE: ${{ matrix.target }}
           DIST_DIR: ${{ github.workspace }}/dist/${{ matrix.target }}
+        run: ./scripts/release/package-release.sh
+
+      - name: Verify the packaged binary version
+        env:
+          BINARY: ${{ steps.package.outputs.binary }}
         run: |
-          ./scripts/release/package-release.sh
-          [[ "$("${{ steps.package.outputs.binary }}" --version)" == "spire ${RELEASE_TAG#v}" ]]
+          [[ -n "${BINARY}" ]]
+          [[ "$("${BINARY}" --version)" == "spire ${RELEASE_TAG#v}" ]]
 
       - name: Upload isolated target candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -209,6 +214,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out the exact validated source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+
       - name: Promote only the smoke-tested release
         id: promote
         env:
