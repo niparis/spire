@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET_TRIPLE: x86_64-unknown-linux-musl
+
+jobs:
+  release:
+    name: Verify and publish release assets
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Verify the triggering tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$(git rev-list -n 1 "${RELEASE_TAG}")" == "${RELEASE_SHA}" ]]
+          ./scripts/release/verify-release.sh "${RELEASE_TAG}"
+
+      - name: Install the pinned Rust toolchain and Linux target
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+          rustup target add "${TARGET_TRIPLE}"
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint the workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test the workspace
+        run: cargo test --workspace
+
+      - name: Test release validation fixtures
+        run: ./scripts/release/test-release-contract.sh
+
+      - name: Package the release archive
+        id: package
+        env:
+          DIST_DIR: ${{ github.workspace }}/dist
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/release/package-release.sh
+
+      - name: Verify the packaged binary version
+        env:
+          EXPECTED_VERSION: ${{ github.ref_name }}
+          BINARY: ${{ steps.package.outputs.binary }}
+        run: |
+          [[ "$("${BINARY}" --version)" == "spire ${EXPECTED_VERSION#v}" ]]
+
+      - name: Publish or complete the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        run: |
+          if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' >is_draft; then
+            if [[ "$(<is_draft)" != true ]]; then
+              printf 'release %s is already published; refusing to overwrite it\n' "${RELEASE_TAG}" >&2
+              exit 1
+            fi
+            gh release upload "${RELEASE_TAG}" \
+              "${ARCHIVE}" \
+              dist/SHA256SUMS \
+              dist/build-metadata.json \
+              --clobber
+          else
+            gh release create "${RELEASE_TAG}" \
+              "${ARCHIVE}" \
+              dist/SHA256SUMS \
+              dist/build-metadata.json \
+              --verify-tag \
+              --title "${RELEASE_TAG}" \
+              --generate-notes \
+              --draft
+          fi
+          gh release edit "${RELEASE_TAG}" --draft=false
