@@ -48,11 +48,30 @@ pub struct LinearConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubConfig {
+    pub installation_id: String,
+    pub credential_ref: String,
+    pub webhook_secret_ref: String,
+    pub request_timeout_seconds: u64,
+    pub repositories: Vec<GitHubRepositoryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitHubRepositoryConfig {
     pub repository: String,
     pub base_branch: String,
     pub required_checks: Vec<String>,
-    pub installation_id: String,
-    pub credential_ref: String,
+    pub workspace_root: PathBuf,
+}
+
+impl GitHubConfig {
+    /// Resolves only explicitly configured repositories. Unknown repositories
+    /// fail closed before an adapter can make a request.
+    pub fn repository(&self, name: &str) -> Option<&GitHubRepositoryConfig> {
+        self.repositories
+            .iter()
+            .find(|entry| entry.repository == name)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -321,8 +340,6 @@ impl Config {
                 self.linear.canceled_state_id.as_str(),
             ),
             ("linear.bot_actor_id", self.linear.bot_actor_id.as_str()),
-            ("github.repository", self.github.repository.as_str()),
-            ("github.base_branch", self.github.base_branch.as_str()),
             (
                 "github.installation_id",
                 self.github.installation_id.as_str(),
@@ -352,10 +369,51 @@ impl Config {
                 "webhook.signing_secret_ref",
                 self.webhook.signing_secret_ref.as_str(),
             ),
+            (
+                "github.webhook_secret_ref",
+                self.github.webhook_secret_ref.as_str(),
+            ),
         ] {
             ensure_credential_reference(path, reference)?;
         }
         validate_webhook(&self.webhook)?;
+        if self.github.repositories.is_empty() {
+            return Err(ConfigError::MissingValue {
+                path: "github.repositories".to_owned(),
+            });
+        }
+        let mut github_repositories = std::collections::BTreeSet::new();
+        for repository in &self.github.repositories {
+            ensure_value("github.repositories[].repository", &repository.repository)?;
+            ensure_value("github.repositories[].base_branch", &repository.base_branch)?;
+            if !repository.workspace_root.is_absolute() {
+                return Err(ConfigError::RelativePath {
+                    path: format!(
+                        "github.repositories[{}].workspace_root",
+                        repository.repository
+                    ),
+                });
+            }
+            if repository.required_checks.is_empty() {
+                return Err(ConfigError::MissingValue {
+                    path: format!(
+                        "github.repositories[{}].required_checks",
+                        repository.repository
+                    ),
+                });
+            }
+            if !github_repositories.insert(&repository.repository) {
+                return Err(ConfigError::Domain {
+                    path: "github.repositories".to_owned(),
+                    message: format!("duplicate repository {}", repository.repository),
+                });
+            }
+        }
+        if self.github.request_timeout_seconds == 0 {
+            return Err(ConfigError::MustBePositive {
+                path: "github.request_timeout_seconds".to_owned(),
+            });
+        }
         if self.linear.complexity_mapping.is_empty() {
             return Err(ConfigError::MissingValue {
                 path: "linear.complexity_mapping".to_owned(),
@@ -668,11 +726,12 @@ linear:
   supported_type_labels: [type:bug]
   repository_mappings: [{label: repo:spire, repository: owner/spire, enabled: true}]
 github:
-  repository: owner/repository
-  base_branch: main
-  required_checks: [test]
   installation_id: installation
   credential_ref: systemd:credentials/github-key
+  webhook_secret_ref: env:GITHUB_WEBHOOK_SECRET
+  request_timeout_seconds: 10
+  repositories:
+    - {repository: owner/repository, base_branch: main, required_checks: [test], workspace_root: /var/lib/spire/workspaces/owner-repository}
 cloudflare: {account_ref: account, zone_ref: zone, webhook_hostname: spire.example.test}
 harnesses:
   codex: {executable: codex, credential_ref: env:CODEX_TOKEN, models: [codex-model], efforts: [medium]}

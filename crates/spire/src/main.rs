@@ -4,21 +4,24 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    body::to_bytes,
+    body::{Bytes, to_bytes},
     extract::{Request, State},
-    http::{HeaderName, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::Response,
     routing::{get, post},
 };
 use clap::{Parser, Subcommand};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use spire_adapters::{
+    github::{GitHubHttpAdapter, GitHubReconciler},
     linear::{LinearReadAdapter, load_credential},
     sqlite::{InboxEvent, LinearObservation, SqliteDatabase},
 };
@@ -56,6 +59,10 @@ enum Command {
     Linear {
         #[command(subcommand)]
         command: LinearCommand,
+    },
+    GitHub {
+        #[command(subcommand)]
+        command: GitHubCommand,
     },
     Scheduler {
         #[command(subcommand)]
@@ -124,6 +131,14 @@ enum LinearCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum GitHubCommand {
+    Reconcile {
+        #[arg(long)]
+        config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum SchedulerCommand {
     Once {
         #[arg(long)]
@@ -156,6 +171,10 @@ enum RunsCommand {
 #[derive(Clone)]
 struct Readiness {
     configuration_valid: bool,
+    database: Option<SqliteDatabase>,
+    github: Option<GitHubHttpAdapter>,
+    github_webhook_secret: Option<Vec<u8>>,
+    github_repositories: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -251,6 +270,9 @@ async fn main() -> Result<()> {
             }
             linear_reconcile(load_config(config)?).await?;
         }
+        Command::GitHub {
+            command: GitHubCommand::Reconcile { config },
+        } => github_reconcile(load_config(config)?).await?,
         Command::Scheduler {
             command: SchedulerCommand::Once { config, dry_run },
         } => {
@@ -418,6 +440,36 @@ async fn linear_reconcile(config: ValidatedConfig) -> Result<()> {
     )
 }
 
+async fn github_reconcile(config: ValidatedConfig) -> Result<()> {
+    let database = SqliteDatabase::initialize(
+        &config.config.runtime.database_path,
+        config.config.runtime.database_max_connections,
+    )
+    .await?;
+    let github = github_adapter(&config)?;
+    let report = GitHubReconciler::new(&database, &github)
+        .reconcile_active_pull_requests(unix_now())
+        .await?;
+    print_json(&report)
+}
+
+fn github_adapter(config: &ValidatedConfig) -> Result<GitHubHttpAdapter> {
+    let repositories = config
+        .config
+        .github
+        .repositories
+        .iter()
+        .map(|entry| spire_domain::RepositoryName::new(entry.repository.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let token = load_credential(&config.config.github.credential_ref)
+        .context("failed to load GitHub credential")?;
+    Ok(GitHubHttpAdapter::new(
+        token,
+        repositories,
+        Duration::from_secs(config.config.github.request_timeout_seconds),
+    )?)
+}
+
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -460,7 +512,7 @@ async fn serve(config: ValidatedConfig) -> Result<()> {
     )
     .await?;
     let webhook_state = WebhookState {
-        database,
+        database: database.clone(),
         path: config.config.webhook.path.clone(),
         organization_id: config.config.linear.organization_id.clone(),
         webhook_id: config.config.webhook.webhook_id.clone(),
@@ -469,7 +521,22 @@ async fn serve(config: ValidatedConfig) -> Result<()> {
     };
     let readiness = Readiness {
         configuration_valid: true,
+        database: Some(database.clone()),
+        github: Some(github_adapter(&config)?),
+        github_webhook_secret: Some(
+            load_credential(&config.config.github.webhook_secret_ref)
+                .context("failed to load GitHub webhook signing secret")?
+                .into_bytes(),
+        ),
+        github_repositories: config
+            .config
+            .github
+            .repositories
+            .iter()
+            .map(|entry| entry.repository.clone())
+            .collect(),
     };
+    spawn_github_reconciliation(database, readiness.github.clone());
     let api = TcpListener::bind(config.config.server.api_bind)
         .await
         .context("failed to bind API listener")?;
@@ -491,11 +558,28 @@ fn public_router(readiness: Readiness, webhook_state: WebhookState) -> Router {
         .route("/health/live", get(live))
         .route("/health/ready", get(public_ready))
         .route(&webhook_state.path, post(linear_webhook))
+        .route("/webhooks/github", post(github_webhook))
         .layer(middleware::from_fn(request_id))
         .with_state(PublicState {
             readiness,
             webhook: webhook_state,
         })
+}
+
+fn spawn_github_reconciliation(database: SqliteDatabase, github: Option<GitHubHttpAdapter>) {
+    let Some(github) = github else { return };
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        loop {
+            ticker.tick().await;
+            if let Err(error) = GitHubReconciler::new(&database, &github)
+                .reconcile_active_pull_requests(unix_now())
+                .await
+            {
+                tracing::warn!(error = %error, "GitHub active-PR reconciliation failed");
+            }
+        }
+    });
 }
 
 fn health_router(readiness: Readiness) -> Router {
@@ -612,6 +696,106 @@ async fn linear_webhook(State(public): State<PublicState>, request: Request) -> 
     }
 }
 
+/// Verifies GitHub's HMAC over the unmodified body before durable, idempotent
+/// receipt. No provider request or lifecycle transition occurs in this path.
+async fn github_webhook(
+    State(public): State<PublicState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    let readiness = public.readiness;
+    let Some(secret) = readiness.github_webhook_secret.as_deref() else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    let Some(signature) = headers
+        .get("x-hub-signature-256")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    if !verify_github_signature(secret, signature, &body) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let Some(delivery_id) = headers
+        .get("x-github-delivery")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let Some(event_type) = headers
+        .get("x-github-event")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
+    if !is_allowlisted_github_repository(&body, &readiness.github_repositories) {
+        return StatusCode::OK;
+    }
+    let Some(database) = readiness.database else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    let selected_headers =
+        serde_json::json!({"delivery": delivery_id, "event": event_type}).to_string();
+    let inbox_id = Uuid::new_v4().to_string();
+    let inserted = match database
+        .insert_inbox(
+            InboxEvent {
+                id: &inbox_id,
+                source: "github",
+                delivery_id,
+                event_type,
+                raw_headers: &selected_headers,
+                raw_body: &body,
+            },
+            unix_now(),
+        )
+        .await
+    {
+        Ok(inserted) => inserted,
+        Err(error) => {
+            tracing::warn!(error = %error, "unable to persist GitHub webhook delivery");
+            return StatusCode::SERVICE_UNAVAILABLE;
+        }
+    };
+    if inserted && let Some(github) = readiness.github {
+        tokio::spawn(async move {
+            if let Err(error) = GitHubReconciler::new(&database, &github)
+                .reconcile_active_pull_requests(unix_now())
+                .await
+            {
+                tracing::warn!(error = %error, "GitHub webhook reconciliation failed");
+            }
+        });
+    }
+    StatusCode::OK
+}
+
+fn verify_github_signature(secret: &[u8], signature: &str, body: &[u8]) -> bool {
+    let Some(encoded) = signature.strip_prefix("sha256=") else {
+        return false;
+    };
+    let Ok(expected) = hex::decode(encoded) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret) else {
+        return false;
+    };
+    mac.update(body);
+    mac.verify_slice(&expected).is_ok()
+}
+
+fn is_allowlisted_github_repository(body: &[u8], allowlist: &BTreeSet<String>) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/repository/full_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|repository| allowlist.contains(&repository))
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -660,6 +844,10 @@ mod tests {
     async fn liveness_never_depends_on_readiness() {
         let response = health_router(Readiness {
             configuration_valid: false,
+            database: None,
+            github: None,
+            github_webhook_secret: None,
+            github_repositories: BTreeSet::new(),
         })
         .oneshot(Request::get("/health/live").body(Body::empty()).unwrap())
         .await
@@ -672,10 +860,25 @@ mod tests {
     async fn readiness_reports_invalid_configuration() {
         let response = health_router(Readiness {
             configuration_valid: false,
+            database: None,
+            github: None,
+            github_webhook_secret: None,
+            github_repositories: BTreeSet::new(),
         })
         .oneshot(Request::get("/health/ready").body(Body::empty()).unwrap())
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn github_signatures_require_the_original_body() {
+        let secret = b"secret";
+        let body = br#"{"repository":{"full_name":"owner/repo"}}"#;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(body);
+        let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        assert!(verify_github_signature(secret, &signature, body));
+        assert!(!verify_github_signature(secret, &signature, b"{}"));
     }
 }

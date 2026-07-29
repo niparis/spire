@@ -1,6 +1,6 @@
 use std::time::SystemTime;
 
-use crate::CanonicalLinearIssue;
+use crate::{CanonicalLinearIssue, CanonicalPullRequest, CheckRun};
 use spire_domain::{
     CommitSha, LinearIssueId, ProviderCapacity, RepositoryName, RunId, WorkItemId, WorkspaceId,
 };
@@ -119,48 +119,37 @@ pub struct CanonicalIssuePage {
     pub next_cursor: Option<String>,
 }
 
+#[allow(async_fn_in_trait)]
 pub trait GitHubPort {
     type Error;
 
-    fn required_checks(
+    async fn required_checks(
         &self,
         repository: &RepositoryName,
         head_sha: &CommitSha,
-    ) -> Result<ExternalResult<RequiredChecks>, Self::Error>;
-    fn get_pull_request(
+    ) -> Result<ExternalResult<Vec<CheckRun>>, Self::Error>;
+    async fn get_pull_request(
         &self,
         repository: &RepositoryName,
         number: u64,
-    ) -> Result<ExternalResult<PullRequest>, Self::Error>;
-    fn find_pull_request_by_branch(
+    ) -> Result<ExternalResult<CanonicalPullRequest>, Self::Error>;
+    async fn find_pull_request_by_branch(
         &self,
         repository: &RepositoryName,
         branch: &str,
-    ) -> Result<ExternalResult<PullRequest>, Self::Error>;
-    fn merge_state(
+    ) -> Result<ExternalResult<CanonicalPullRequest>, Self::Error>;
+    async fn merge_state(
         &self,
         repository: &RepositoryName,
         number: u64,
     ) -> Result<ExternalResult<MergeState>, Self::Error>;
-    fn post_review_summary(
+    async fn post_review_summary(
         &self,
         repository: &RepositoryName,
         number: u64,
         idempotency_key: &IdempotencyKey,
         body: &str,
     ) -> Result<ExternalResult<()>, Self::Error>;
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RequiredChecks {
-    pub head_sha: CommitSha,
-    pub all_successful: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PullRequest {
-    pub number: u64,
-    pub head_sha: CommitSha,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

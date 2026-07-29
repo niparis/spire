@@ -65,6 +65,34 @@ pub enum ClaimBlock {
     TicketCapacity,
 }
 
+pub const MAX_INITIAL_CI_CORRECTION_CYCLES: u8 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiCorrectionDecision {
+    Dispatch { next_cycle: u8 },
+    WaitForCapacity(ClaimBlock),
+    Exhausted,
+}
+
+/// Capacity waits are operational, not engineering failures: they never consume
+/// one of the two bounded CI correction cycles.
+pub fn plan_ci_correction(
+    completed_cycles: u8,
+    limits: CapacityLimits,
+    counts: CapacityCounts,
+) -> CiCorrectionDecision {
+    if completed_cycles >= MAX_INITIAL_CI_CORRECTION_CYCLES {
+        return CiCorrectionDecision::Exhausted;
+    }
+    match capacity_allows(limits, counts, SchedulerInitiator::Ai) {
+        Ok(()) => CiCorrectionDecision::Dispatch {
+            next_cycle: completed_cycles + 1,
+        },
+        Err(block) => CiCorrectionDecision::WaitForCapacity(block),
+    }
+}
+
 pub fn capacity_allows(
     limits: CapacityLimits,
     counts: CapacityCounts,
@@ -264,6 +292,33 @@ mod tests {
         );
         assert!(
             matches!(selection, CandidateSelection::Selected { candidate, evaluations } if candidate == second && evaluations.len() == 2)
+        );
+    }
+
+    #[test]
+    fn ci_capacity_wait_does_not_consume_an_engineering_cycle() {
+        let limits = CapacityLimits {
+            total: 3,
+            ai: 1,
+            per_repository: 1,
+            per_ticket: 1,
+        };
+        assert_eq!(
+            plan_ci_correction(
+                1,
+                limits,
+                CapacityCounts {
+                    total: 1,
+                    ai: 1,
+                    repository: 0,
+                    ticket: 0
+                }
+            ),
+            CiCorrectionDecision::WaitForCapacity(ClaimBlock::AiCapacity)
+        );
+        assert_eq!(
+            plan_ci_correction(2, limits, CapacityCounts::default()),
+            CiCorrectionDecision::Exhausted
         );
     }
 }

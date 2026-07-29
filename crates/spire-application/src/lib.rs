@@ -5,6 +5,7 @@
 pub mod claim;
 pub mod config;
 pub mod execution;
+pub mod github;
 pub mod ingestion;
 pub mod linear;
 pub mod outbox;
@@ -17,6 +18,7 @@ pub mod webhook;
 pub use claim::*;
 pub use config::*;
 pub use execution::*;
+pub use github::*;
 pub use ingestion::*;
 pub use linear::*;
 pub use outbox::*;
