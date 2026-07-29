@@ -16,7 +16,7 @@ use spire_application::{
     ProbeConfidence, RelevantIssueQuery, ServiceAuthenticationProbe,
     ServiceAuthenticationProbePort,
 };
-use spire_domain::LinearIssueId;
+use spire_domain::{LinearIssueId, LinearProjectId};
 use thiserror::Error;
 use tracing::debug;
 
@@ -301,6 +301,7 @@ struct RawIssue {
     identifier: String,
     team: RawId,
     state: RawId,
+    project: Option<RawProject>,
     estimate: Option<u8>,
     priority: Option<u8>,
     labels: RawConnection<RawName>,
@@ -317,6 +318,11 @@ struct RawId {
 }
 #[derive(Deserialize)]
 struct RawName {
+    name: String,
+}
+#[derive(Deserialize)]
+struct RawProject {
+    id: String,
     name: String,
 }
 #[derive(Deserialize)]
@@ -356,17 +362,30 @@ pub fn normalize_issue_fixture(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let description = raw.description;
+    let project_id = raw
+        .project
+        .as_ref()
+        .map(|project| LinearProjectId::new(project.id.clone()))
+        .transpose()
+        .map_err(|_| LinearAdapterError::MalformedResponse)?;
+    let project_name_snapshot = raw.project.map(|project| project.name);
     let acceptance_criteria = description
         .as_deref()
         .filter(|text| text.to_ascii_lowercase().contains("acceptance criteria"))
         .map(str::to_owned);
-    let revision =
-        CanonicalLinearIssue::revision(&raw.updated_at, description.as_deref().unwrap_or(""));
+    let revision = CanonicalLinearIssue::revision(
+        &raw.updated_at,
+        description.as_deref().unwrap_or(""),
+        project_id.as_ref(),
+        project_name_snapshot.as_deref(),
+    );
     Ok(Some(CanonicalLinearIssue {
         id: LinearIssueId::new(raw.id).map_err(|_| LinearAdapterError::MalformedResponse)?,
         identifier: raw.identifier,
         team_id: raw.team.id,
         workflow_state_id: raw.state.id,
+        project_id,
+        project_name_snapshot,
         estimate: raw.estimate,
         priority: raw.priority,
         labels: raw
@@ -461,8 +480,8 @@ fn parse_page(value: Value) -> Result<CanonicalIssuePage, LinearAdapterError> {
     })
 }
 
-const ISSUE_QUERY: &str = "query Issue($id: String!) { issue(id: $id) { id identifier team { id } state { id } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } }";
-const ISSUES_QUERY: &str = "query Issues($first: Int!, $after: String, $filter: IssueFilter) { issues(first: $first, after: $after, filter: $filter) { nodes { id identifier team { id } state { id } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } pageInfo { hasNextPage endCursor } } }";
+const ISSUE_QUERY: &str = "query Issue($id: String!) { issue(id: $id) { id identifier team { id } state { id } project { id name } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } }";
+const ISSUES_QUERY: &str = "query Issues($first: Int!, $after: String, $filter: IssueFilter) { issues(first: $first, after: $after, filter: $filter) { nodes { id identifier team { id } state { id } project { id name } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } pageInfo { hasNextPage endCursor } } }";
 const VIEWER_QUERY: &str = "query Viewer { viewer { id organization { id } } }";
 
 #[cfg(test)]
@@ -470,10 +489,11 @@ mod tests {
     use super::*;
     #[test]
     fn normalizes_optional_values_and_hashes_untrusted_description() {
-        let issue = normalize_issue_fixture(serde_json::json!({"id":"issue-1","identifier":"SPI-1","team":{"id":"team"},"state":{"id":"ready"},"estimate":null,"priority":null,"labels":{"nodes":[{"name":"type:bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}},"relations":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}},"description":"untrusted instruction","assignee":null,"creator":null,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"})).unwrap().unwrap();
+        let issue = normalize_issue_fixture(serde_json::json!({"id":"issue-1","identifier":"SPI-1","team":{"id":"team"},"state":{"id":"ready"},"project":{"id":"project-1","name":"Project"},"estimate":null,"priority":null,"labels":{"nodes":[{"name":"type:bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}},"relations":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}},"description":"untrusted instruction","assignee":null,"creator":null,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"})).unwrap().unwrap();
         assert_eq!(issue.estimate, None);
         assert_eq!(issue.assignee_id, None);
         assert_ne!(issue.revision, issue.updated_at);
+        assert_eq!(issue.project_id.unwrap().as_str(), "project-1");
     }
 
     #[test]
