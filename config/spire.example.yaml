@@ -1,7 +1,7 @@
 # Sprint 00 contract template. This is deliberately not an operational
 # configuration: every REPLACE_ME value must be replaced and validated by
 # `spire config validate` before automation is enabled.
-schema_version: 1
+schema_version: 2
 
 linear:
   organization_id: REPLACE_ME_LINEAR_ORGANIZATION_ID
@@ -76,3 +76,21 @@ runtime:
 server:
   api_bind: 127.0.0.1:8080
   admin_bind: 127.0.0.1:8081
+
+# Only this exact path is exposed through Cloudflare Tunnel. Keep the API
+# listener on loopback; `/admin` remains on the separate loopback listener.
+webhook:
+  path: /webhooks/linear
+  signing_secret_ref: systemd:credentials/linear-webhook-secret
+  webhook_id: REPLACE_ME_LINEAR_WEBHOOK_ID
+  replay_window_seconds: 300
+  max_body_bytes: 262144
+
+# The default is fail-closed. Enabling this requires one explicit pilot team,
+# repository, and work-type label, and is capped at one live harness run.
+rollout:
+  linear_writes_enabled: false
+  allowed_team_ids: []
+  allowed_repositories: []
+  allowed_type_labels: []
+  max_active_harness_runs: 1

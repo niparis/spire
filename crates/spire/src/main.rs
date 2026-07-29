@@ -3,25 +3,29 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use axum::{
     Router,
+    body::to_bytes,
     extract::{Request, State},
     http::{HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use clap::{Parser, Subcommand};
 use spire_adapters::{
-    linear::LinearReadAdapter,
-    sqlite::{LinearObservation, SqliteDatabase},
+    linear::{LinearReadAdapter, load_credential},
+    sqlite::{InboxEvent, LinearObservation, SqliteDatabase},
 };
 use spire_application::{
     CanonicalLinearIssue, Config, EligibilityInput, ExternalResult, LinearReadPort,
-    RelevantIssueQuery, ValidatedConfig, dispatch_is_covered, evaluate_eligibility,
+    RelevantIssueQuery, ValidatedConfig, WebhookAllowlist, WebhookRequest, accept_delivery,
+    dispatch_is_covered, evaluate_eligibility,
 };
 use spire_domain::{ComplexityClass, HarnessId, LinearIssueId, RunRole};
 use tokio::net::TcpListener;
@@ -152,6 +156,22 @@ enum RunsCommand {
 #[derive(Clone)]
 struct Readiness {
     configuration_valid: bool,
+}
+
+#[derive(Clone)]
+struct WebhookState {
+    database: SqliteDatabase,
+    path: String,
+    organization_id: String,
+    webhook_id: String,
+    limits: spire_application::WebhookLimits,
+    signing_secret: Arc<[u8]>,
+}
+
+#[derive(Clone)]
+struct PublicState {
+    readiness: Readiness,
+    webhook: WebhookState,
 }
 
 #[tokio::main]
@@ -432,6 +452,21 @@ fn dispatch_dry_run(config: ValidatedConfig, maker_harness: Option<String>) -> R
 }
 
 async fn serve(config: ValidatedConfig) -> Result<()> {
+    let signing_secret = load_credential(&config.config.webhook.signing_secret_ref)
+        .context("failed to load Linear webhook signing secret")?;
+    let database = SqliteDatabase::initialize(
+        &config.config.runtime.database_path,
+        config.config.runtime.database_max_connections,
+    )
+    .await?;
+    let webhook_state = WebhookState {
+        database,
+        path: config.config.webhook.path.clone(),
+        organization_id: config.config.linear.organization_id.clone(),
+        webhook_id: config.config.webhook.webhook_id.clone(),
+        limits: config.webhook_limits(),
+        signing_secret: Arc::from(signing_secret.into_bytes()),
+    };
     let readiness = Readiness {
         configuration_valid: true,
     };
@@ -443,12 +478,24 @@ async fn serve(config: ValidatedConfig) -> Result<()> {
         .context("failed to bind loopback admin listener")?;
     info!(api = %config.config.server.api_bind, admin = %config.config.server.admin_bind, "starting Spire foundation service");
 
-    let api_server = axum::serve(api, health_router(readiness.clone()))
+    let api_server = axum::serve(api, public_router(readiness.clone(), webhook_state))
         .with_graceful_shutdown(shutdown_signal());
     let admin_server =
         axum::serve(admin, health_router(readiness)).with_graceful_shutdown(shutdown_signal());
     tokio::try_join!(api_server, admin_server).context("health server stopped unexpectedly")?;
     Ok(())
+}
+
+fn public_router(readiness: Readiness, webhook_state: WebhookState) -> Router {
+    Router::new()
+        .route("/health/live", get(live))
+        .route("/health/ready", get(public_ready))
+        .route(&webhook_state.path, post(linear_webhook))
+        .layer(middleware::from_fn(request_id))
+        .with_state(PublicState {
+            readiness,
+            webhook: webhook_state,
+        })
 }
 
 fn health_router(readiness: Readiness) -> Router {
@@ -457,6 +504,119 @@ fn health_router(readiness: Readiness) -> Router {
         .route("/health/ready", get(ready))
         .layer(middleware::from_fn(request_id))
         .with_state(readiness)
+}
+
+/// The public handler is intentionally limited to raw-body verification and
+/// durable inbox insertion. Canonical Linear reads, lifecycle decisions, and
+/// all harness work happen asynchronously after this `200` response.
+async fn public_ready(State(state): State<PublicState>) -> StatusCode {
+    if state.readiness.configuration_valid {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+async fn linear_webhook(State(public): State<PublicState>, request: Request) -> StatusCode {
+    let state = public.webhook;
+    let method = request.method().as_str().to_owned();
+    let path = request.uri().path().to_owned();
+    let content_type = request
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let signature = request
+        .headers()
+        .get(spire_application::SIGNATURE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let delivery_id = request
+        .headers()
+        .get(spire_application::DELIVERY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let declared_length = request
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    let body = match to_bytes(request.into_body(), state.limits.max_body_bytes).await {
+        Ok(body) => body,
+        Err(_) => return StatusCode::PAYLOAD_TOO_LARGE,
+    };
+    let accepted = match accept_delivery(
+        &WebhookRequest {
+            method: &method,
+            path: &path,
+            content_type: content_type.as_deref(),
+            signature: signature.as_deref(),
+            delivery_id: delivery_id.as_deref(),
+            declared_length,
+            body: &body,
+        },
+        &state.path,
+        state.limits,
+        &state.signing_secret,
+        WebhookAllowlist {
+            organization_id: &state.organization_id,
+            webhook_id: &state.webhook_id,
+        },
+        unix_now(),
+    ) {
+        Ok(accepted) => accepted,
+        Err(rejection) if rejection.is_authentication_failure() => {
+            tracing::warn!(reason = rejection.reason(), "Linear webhook rejected");
+            return StatusCode::UNAUTHORIZED;
+        }
+        Err(rejection) => {
+            tracing::warn!(reason = rejection.reason(), "Linear webhook rejected");
+            return match rejection {
+                spire_application::WebhookRejection::MethodNotAllowed => {
+                    StatusCode::METHOD_NOT_ALLOWED
+                }
+                spire_application::WebhookRejection::PathNotFound => StatusCode::NOT_FOUND,
+                spire_application::WebhookRejection::UnsupportedMediaType => {
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE
+                }
+                spire_application::WebhookRejection::BodyTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                _ => StatusCode::BAD_REQUEST,
+            };
+        }
+    };
+    let headers = match serde_json::to_string(&accepted.redacted_headers) {
+        Ok(headers) => headers,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let inbox_id = Uuid::new_v4().to_string();
+    let inserted = state
+        .database
+        .insert_inbox(
+            InboxEvent {
+                id: &inbox_id,
+                source: "linear",
+                delivery_id: &accepted.envelope.delivery_id,
+                event_type: &accepted.envelope.event_type,
+                raw_headers: &headers,
+                raw_body: &body,
+            },
+            unix_now(),
+        )
+        .await;
+    match inserted {
+        Ok(_) => StatusCode::OK,
+        Err(error) => {
+            tracing::error!(error = %error, "Linear webhook inbox insert failed");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 async fn request_id(mut request: Request, next: Next) -> Response {
