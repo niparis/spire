@@ -766,20 +766,17 @@ fn doctor(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Resu
         );
     } else {
         findings.push(DiagnosticFinding::required(
-            "SPIRE-AUTH-003",
+            "SPIRE-AUTH-004",
             AuthenticationState::Unsupported,
             "system-profile secret-store diagnostics are not implemented",
             Some("use the advanced system credential-store adapter".into()),
         ));
     }
     findings.push(DiagnosticFinding::required(
-        "SPIRE-AUTH-004",
+        "SPIRE-AUTH-005",
         AuthenticationState::Unsupported,
-        "GitHub authentication lifecycle is blocked pending the approved identity decision",
-        Some(
-            "select GitHub App or scoped bot token in docs/decisions/security-and-authority.md"
-                .into(),
-        ),
+        "GitHub App authentication lifecycle is not implemented",
+        Some("complete GitHub App manifest onboarding and installation verification".into()),
     ));
     let report = DiagnosticReport::from_findings(findings);
     print_diagnostic_report(&report, format)?;
@@ -810,9 +807,15 @@ fn secret_status_report(store: &UserSecretStore) -> DiagnosticReport {
         ),
         finding(
             "SPIRE-AUTH-002",
-            ManagedSecret::GitHubCredential,
-            "GitHub",
-            "install or inspect the GitHub service credential with spire auth",
+            ManagedSecret::GitHubAppPrivateKey,
+            "GitHub App private key",
+            "register the GitHub App with spire auth login github",
+        ),
+        finding(
+            "SPIRE-AUTH-003",
+            ManagedSecret::GitHubWebhookSecret,
+            "GitHub App webhook secret",
+            "register the GitHub App with spire auth login github",
         ),
     ])
 }
