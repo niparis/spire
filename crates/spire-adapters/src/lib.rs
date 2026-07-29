@@ -7,5 +7,7 @@
 
 pub struct AdapterBoundary;
 
+pub mod harness;
 pub mod linear;
 pub mod sqlite;
+pub mod workspace;
