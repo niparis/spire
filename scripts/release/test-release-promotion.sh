@@ -4,6 +4,7 @@ set -euo pipefail
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly assembler="${repository_root}/scripts/release/assemble-release.sh"
 readonly publisher="${repository_root}/scripts/release/publish-release.sh"
+readonly release_workflow="${repository_root}/.github/workflows/release.yml"
 readonly version="$(awk '
   /^\[workspace\.package\]$/ { active = 1; next }
   /^\[/ { active = 0 }
@@ -142,3 +143,39 @@ if run_publisher >/dev/null 2>&1; then
 fi
 
 printf 'release promotion fixtures pass\n'
+
+package_step="$(
+  awk '
+    /- name: Package the native target/ { active = 1 }
+    /- name: Verify the packaged binary version/ { active = 0 }
+    active { print }
+  ' "${release_workflow}"
+)"
+if grep -Fq 'steps.package.outputs.binary' <<<"${package_step}"; then
+  printf 'package step consumes its own unavailable output\n' >&2
+  exit 1
+fi
+
+grep -Fq 'BINARY: ${{ steps.package.outputs.binary }}' "${release_workflow}" || {
+  printf 'separate packaged-binary verification step is missing\n' >&2
+  exit 1
+}
+
+promotion_job="$(
+  awk '
+    /^  promote_latest:/ { active = 1 }
+    active { print }
+  ' "${release_workflow}"
+)"
+checkout_line="$(
+  grep -n -m1 'uses: actions/checkout@' <<<"${promotion_job}" | cut -d: -f1
+)"
+promotion_line="$(
+  grep -n -m1 'run: ./scripts/release/promote-latest.sh' <<<"${promotion_job}" | cut -d: -f1
+)"
+[[ -n "${checkout_line}" && -n "${promotion_line}" && "${checkout_line}" -lt "${promotion_line}" ]] || {
+  printf 'latest-promotion job must check out the validated source before running repository scripts\n' >&2
+  exit 1
+}
+
+printf 'release workflow structure fixtures pass\n'
