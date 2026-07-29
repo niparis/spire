@@ -16,7 +16,7 @@ pub fn install(paths: &ResolvedPaths, binary: &Path, yes: bool) -> Result<()> {
     let unit_path = unit_path(paths)?;
     let rendered = render(paths, binary)?;
     if !yes {
-        println!("{}", rendered);
+        println!("{rendered}");
         println!(
             "preview only; rerun with `spire service install --yes` to write {}",
             unit_path.display()
@@ -100,8 +100,7 @@ pub fn render(paths: &ResolvedPaths, binary: &Path) -> Result<String> {
     ]
     .join(" ");
     Ok(format!(
-        "[Unit]\nDescription=Spire orchestrator (user)\nAfter=network-online.target\nWants=network-online.target\nConditionPathExists={}\n\n[Service]\nType=simple\nUMask=0077\nExecStartPre={} config validate --config {}\nExecStart={} serve --config {}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=120\nKillSignal=SIGINT\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\nReadWritePaths={}\n\n[Install]\nWantedBy=default.target\n",
-        config, binary, config, binary, config, writable
+        "[Unit]\nDescription=Spire orchestrator (user)\nAfter=network-online.target\nWants=network-online.target\nConditionPathExists={config}\n\n[Service]\nType=simple\nUMask=0077\nExecStartPre={binary} config validate --config {config}\nExecStart={binary} serve --config {config}\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=120\nKillSignal=SIGINT\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=read-only\nReadWritePaths={writable}\n\n[Install]\nWantedBy=default.target\n",
     ))
 }
 
