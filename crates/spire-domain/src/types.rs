@@ -118,9 +118,11 @@ uuid_value!(WorkItemId, "work item ID");
 uuid_value!(RunId, "run ID");
 uuid_value!(ReviewCycleId, "review cycle ID");
 uuid_value!(WorkspaceId, "workspace ID");
+uuid_value!(ProjectRepositoryMappingId, "project repository mapping ID");
 
 string_value!(LinearIssueId, "Linear issue ID");
 string_value!(LinearIdentifier, "Linear issue identifier");
+string_value!(LinearProjectId, "Linear project ID");
 string_value!(RepositoryName, "repository name");
 string_value!(CommitSha, "commit SHA");
 string_value!(HarnessId, "harness ID");
@@ -197,6 +199,48 @@ impl DispatchPolicyVersion {
     pub fn value(self) -> u32 {
         self.0
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ProjectMappingRevision(u64);
+
+impl ProjectMappingRevision {
+    pub fn new(value: u64) -> Result<Self, ValueError> {
+        if value == 0 {
+            return Err(ValueError::Invalid {
+                kind: "project mapping revision",
+                value: value.to_string(),
+            });
+        }
+        Ok(Self(value))
+    }
+
+    pub fn value(self) -> u64 {
+        self.0
+    }
+
+    pub fn next(self) -> Self {
+        Self(self.0.saturating_add(1))
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectMappingRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        u64::deserialize(deserializer)
+            .and_then(|value| Self::new(value).map_err(serde::de::Error::custom))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectMappingStatus {
+    Enabled,
+    Disabled,
+    Removed,
 }
 
 impl<'de> Deserialize<'de> for DispatchPolicyVersion {
@@ -277,6 +321,7 @@ mod tests {
         ));
         assert!(ComplexityEstimate::new(0).is_err());
         assert!(DispatchPolicyVersion::new(0).is_err());
+        assert!(ProjectMappingRevision::new(0).is_err());
     }
 
     #[test]
@@ -294,5 +339,6 @@ mod tests {
         assert!(serde_json::from_str::<HarnessId>("\"\"").is_err());
         assert!(serde_json::from_str::<ComplexityEstimate>("0").is_err());
         assert!(serde_json::from_str::<DispatchPolicyVersion>("0").is_err());
+        assert!(serde_json::from_str::<ProjectMappingRevision>("0").is_err());
     }
 }
