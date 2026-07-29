@@ -139,8 +139,9 @@ The endpoint follows the same durable-inbox rule:
 4. Return promptly.
 5. Resolve canonical PR and check state asynchronously.
 
-The exact event set depends on whether the installation uses a GitHub App or a
-repository webhook. The application core consumes normalized facts rather than raw
+Events are delivered by the operator's GitHub App installation, so the event set
+is fixed by the App registration manifest rather than by per-repository webhook
+configuration. The application core consumes normalized facts rather than raw
 GitHub event variants.
 
 #### `POST /admin/reconcile`
@@ -1872,8 +1873,7 @@ high-level roadmap.
 | P0 | Harness capacity signal mapping | Codex and Claude outputs must distinguish context, quota, rate, auth, model, and task failures |
 | P0 | Mid-run same-harness continuation | We must prove how each harness resumes from a fresh context on a preserved worktree |
 | P0 | Cloudflare tunnel hostname and access policy | Linear requires stable public HTTPS while admin APIs must remain private |
-| P0 | GitHub App versus bot token | Determines webhook installation, check publishing, and repository permissions |
-| P0 | Who commits and pushes: harness or mechanical publisher | Defines the most important credential boundary |
+| P0 | Who commits and pushes: harness or mechanical publisher | Defines the most important credential boundary, and the App's `contents` permission |
 | P0 | Git worktree allocation/recovery proof | The accepted worktree-first contract still needs Git-aware allocation, detached review, restart reconciliation, and cleanup evidence |
 | P0 | Exact Linear readiness contract | A status alone may not prove specification quality or repository routing |
 | P0 | Human conflict policy | The reconciler must know when not to overwrite a recent human status change |
@@ -2103,7 +2103,7 @@ duplicate implementation or same-provider review.
 - **Linear configuration:** Organization/team IDs, status IDs, labels, issue relations, and bot/OAuth identity are unknown.
 - **Linear complexity:** The workspace estimate scale, required-field behavior, and
   mapping to dispatch classes have not been inspected.
-- **GitHub configuration:** App/token model, repository list, required checks, merge queue, and webhook installation are unknown.
+- **GitHub configuration:** the identity is a GitHub App (`docs/decisions/github-app-identity.md`); repository list, required checks, merge queue, and branch protection are unknown.
 - **Dispatch policy:** Supported triplets, exact model IDs, effort translations,
   and candidate fallback ordering are undefined.
 - **Capacity classification:** Real Codex and Claude Code exit codes/output for

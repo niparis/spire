@@ -13,7 +13,7 @@ The committed example configuration contains names and credential references onl
 | Linear | test-team ID and workflow-state IDs | each state resolves and belongs to that team | unverified |
 | Linear | estimate scale and bot actor ID | redacted workspace/team response | unverified |
 | GitHub | pilot repository, base branch, required checks | read-only repository and branch-protection response | unverified |
-| GitHub | App installation identity | read-only installation response | unverified |
+| GitHub | App installation identity and granted permissions | read-only installation response | unverified |
 | Cloudflare | account/zone owner and webhook hostname | operator-owned DNS/Access record | unverified |
 | VM | distribution and systemd version | `cat /etc/os-release`; `systemctl --version` | unverified |
 
@@ -33,7 +33,13 @@ records. Values must be injected by the deployment environment, never committed.
 |---|---|---|
 | Linear read/write adapter | `systemd:credentials/linear-api-token` | Linear adapter only |
 | GitHub App signing key | `systemd:credentials/github-app-private-key` | publisher only |
-| Webhook verification | `systemd:credentials/linear-webhook-secret` | ingress only |
+| GitHub webhook verification | `systemd:credentials/github-webhook-secret` | ingress only |
+| Linear webhook verification | `systemd:credentials/linear-webhook-secret` | ingress only |
+
+These reference forms apply to the system installation profile. A default user
+installation holds the same material in the user secret store. The GitHub App
+signing key and webhook secret are generated during registration, never authored
+by an operator; see [`github-app-identity.md`](github-app-identity.md).
 
 ## Completion procedure
 

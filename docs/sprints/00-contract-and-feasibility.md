@@ -191,7 +191,8 @@ Verification:
 
 Decide and record:
 
-- GitHub App versus bot token.
+- GitHub App versus bot token. Closed: GitHub App, recorded in
+  [`../decisions/github-app-identity.md`](../decisions/github-app-identity.md).
 - Whether the harness pushes directly or a mechanical publisher pushes.
 - Exact branch/PR permissions for maker and read-only permissions for checker.
 - Webhook secrets and harness credentials storage.
