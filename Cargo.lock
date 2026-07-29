@@ -1773,6 +1773,7 @@ version = "2.0.0-rc.1"
 dependencies = [
  "hmac",
  "lineark-sdk",
+ "nix",
  "reqwest",
  "serde",
  "serde_json",

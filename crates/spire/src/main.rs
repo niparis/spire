@@ -5,8 +5,9 @@ mod user_service;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
-    io::Write,
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -24,15 +25,21 @@ use axum::{
 };
 use clap::{Parser, Subcommand};
 use hmac::{Hmac, Mac};
+use nix::{
+    sys::termios::{self, LocalFlags, SetArg},
+    unistd::Uid,
+};
 use sha2::Sha256;
 use spire_adapters::{
     github::{GitHubHttpAdapter, GitHubReconciler},
     linear::{LinearReadAdapter, load_credential},
+    secrets::UserSecretStore,
     sqlite::{InboxEvent, LinearObservation, SqliteDatabase},
 };
 use spire_application::{
-    CanonicalLinearIssue, Config, EligibilityInput, ExternalResult, LinearReadPort,
-    RelevantIssueQuery, ValidatedConfig, WebhookAllowlist, WebhookRequest, accept_delivery,
+    AuthenticationState, CanonicalLinearIssue, Config, DiagnosticFinding, DiagnosticReport,
+    EligibilityInput, ExternalResult, LinearReadPort, ManagedSecret, RelevantIssueQuery,
+    SecretStorePort, ValidatedConfig, WebhookAllowlist, WebhookRequest, accept_delivery,
     dispatch_is_covered, evaluate_eligibility,
 };
 use spire_domain::{ComplexityClass, HarnessId, LinearIssueId, RunRole};
@@ -74,6 +81,14 @@ enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    Doctor {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
     },
     Dispatch {
         #[command(subcommand)]
@@ -122,6 +137,39 @@ enum ConfigCommand {
         #[arg(long)]
         write: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    Status {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Login {
+        service: AuthService,
+        /// Read the credential from a regular 0600 file owned by the runtime
+        /// user. The credential itself is never accepted as an argument.
+        #[arg(long)]
+        credential_file: Option<PathBuf>,
+    },
+    Rotate {
+        service: AuthService,
+        /// Read the replacement credential from a regular 0600 file owned by
+        /// the runtime user. The credential itself is never accepted as an
+        /// argument.
+        #[arg(long)]
+        credential_file: Option<PathBuf>,
+    },
+    Remove {
+        service: AuthService,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum AuthService {
+    Linear,
+    #[value(name = "github")]
+    GitHub,
 }
 
 #[derive(Debug, Subcommand)]
@@ -290,6 +338,25 @@ async fn main() -> Result<()> {
         Command::Config {
             command: ConfigCommand::Migrate { from, write },
         } => config_migrate(&from, write)?,
+        Command::Auth { command } => {
+            let paths = resolve_runtime_paths(config_override.as_deref(), system)?;
+            match command {
+                AuthCommand::Status { format } => auth_status(paths, format)?,
+                AuthCommand::Login {
+                    service,
+                    credential_file,
+                } => auth_login(paths, service, credential_file).await?,
+                AuthCommand::Rotate {
+                    service,
+                    credential_file,
+                } => auth_rotate(paths, service, credential_file).await?,
+                AuthCommand::Remove { service } => auth_remove(paths, service)?,
+            }
+        }
+        Command::Doctor { format } => doctor(
+            resolve_runtime_paths(config_override.as_deref(), system)?,
+            format,
+        )?,
         Command::Dispatch {
             command: DispatchCommand::DryRun { maker_harness },
         } => dispatch_dry_run(
@@ -336,8 +403,9 @@ async fn main() -> Result<()> {
             command: LinearCommand::Get { issue },
         } => {
             let config = load_config(config_override.as_deref(), system)?;
+            let paths = resolve_runtime_paths(config_override.as_deref(), system)?;
             let issue = LinearIssueId::new(issue).context("invalid Linear issue ID")?;
-            let adapter = linear_adapter(&config)?;
+            let adapter = linear_adapter(&config, &paths)?;
             match adapter.get_canonical_issue(&issue).await? {
                 ExternalResult::Confirmed(issue) => print_json(&issue)?,
                 ExternalResult::NotFound => anyhow::bail!("Linear issue was not found"),
@@ -350,8 +418,9 @@ async fn main() -> Result<()> {
             command: LinearCommand::Explain { issue },
         } => {
             let config = load_config(config_override.as_deref(), system)?;
+            let paths = resolve_runtime_paths(config_override.as_deref(), system)?;
             let issue_id = LinearIssueId::new(issue).context("invalid Linear issue ID")?;
-            let adapter = linear_adapter(&config)?;
+            let adapter = linear_adapter(&config, &paths)?;
             match adapter.get_canonical_issue(&issue_id).await? {
                 ExternalResult::Confirmed(issue) => print_json(&explain_issue(&config, &issue))?,
                 ExternalResult::NotFound => anyhow::bail!("Linear issue was not found"),
@@ -366,7 +435,9 @@ async fn main() -> Result<()> {
             if !dry_run {
                 anyhow::bail!("Linear reconciliation is read-only in Sprint 03; pass --dry-run");
             }
-            linear_reconcile(load_config(config_override.as_deref(), system)?).await?;
+            let config = load_config(config_override.as_deref(), system)?;
+            let paths = resolve_runtime_paths(config_override.as_deref(), system)?;
+            linear_reconcile(config, paths).await?;
         }
         Command::GitHub {
             command: GitHubCommand::Reconcile,
@@ -440,8 +511,25 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn linear_adapter(config: &ValidatedConfig) -> Result<LinearReadAdapter> {
-    LinearReadAdapter::from_credential_reference(&config.config.linear.credential_ref)
+fn linear_adapter(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+) -> Result<LinearReadAdapter> {
+    if paths.profile == spire_application::InstallationProfile::User {
+        let token = UserSecretStore::below_config_root(&paths.config_root)
+            .read_for_service(ManagedSecret::LinearApiKey)
+            .context("failed to load the Linear API key from the user secret store")?;
+        return LinearReadAdapter::from_token(token.as_str().to_owned())
+            .context("failed to construct read-only Linear adapter");
+    }
+
+    let reference = config
+        .config
+        .linear
+        .credential_ref
+        .as_deref()
+        .context("system-profile Linear authentication requires linear.credential_ref")?;
+    LinearReadAdapter::from_credential_reference(reference)
         .context("failed to construct read-only Linear adapter")
 }
 
@@ -477,8 +565,11 @@ fn explain_issue(config: &ValidatedConfig, issue: &CanonicalLinearIssue) -> serd
     serde_json::json!({"issue": issue, "eligibility": eligibility, "linear_writes_enabled": false})
 }
 
-async fn linear_reconcile(config: ValidatedConfig) -> Result<()> {
-    let adapter = linear_adapter(&config)?;
+async fn linear_reconcile(
+    config: ValidatedConfig,
+    paths: spire_application::ResolvedPaths,
+) -> Result<()> {
+    let adapter = linear_adapter(&config, &paths)?;
     let database = SqliteDatabase::initialize(
         &config.config.runtime.database_path,
         config.config.runtime.database_max_connections,
@@ -695,6 +786,255 @@ fn print_paths(paths: spire_application::ResolvedPaths, format: OutputFormat) ->
         OutputFormat::Json => print_json(&paths)?,
     }
     Ok(())
+}
+
+fn auth_status(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Result<()> {
+    if paths.profile != spire_application::InstallationProfile::User {
+        anyhow::bail!(
+            "system-profile authentication requires its separate credential-store adapter; no user secret store was consulted"
+        );
+    }
+    let store = UserSecretStore::below_config_root(&paths.config_root);
+    let report = secret_status_report(&store);
+    print_diagnostic_report(&report, format)?;
+    Ok(())
+}
+
+async fn auth_login(
+    paths: spire_application::ResolvedPaths,
+    service: AuthService,
+    credential_file: Option<PathBuf>,
+) -> Result<()> {
+    match service {
+        AuthService::Linear => install_linear_credential(paths, credential_file, false).await,
+        AuthService::GitHub => anyhow::bail!(
+            "GitHub App registration is not implemented; no credential was accepted or stored"
+        ),
+    }
+}
+
+async fn auth_rotate(
+    paths: spire_application::ResolvedPaths,
+    service: AuthService,
+    credential_file: Option<PathBuf>,
+) -> Result<()> {
+    match service {
+        AuthService::Linear => install_linear_credential(paths, credential_file, true).await,
+        AuthService::GitHub => anyhow::bail!(
+            "GitHub App key rotation is not implemented; no credential was accepted or stored"
+        ),
+    }
+}
+
+fn auth_remove(paths: spire_application::ResolvedPaths, service: AuthService) -> Result<()> {
+    ensure_user_auth_profile(&paths)?;
+    match service {
+        AuthService::Linear => {
+            let store = UserSecretStore::below_config_root(&paths.config_root);
+            store
+                .remove(ManagedSecret::LinearApiKey)
+                .context("failed to remove the Linear API key")?;
+            if store.status(ManagedSecret::LinearApiKey)? != AuthenticationState::Unavailable {
+                anyhow::bail!("Linear credential removal did not leave the installation non-ready")
+            }
+            println!("Linear authentication removed; Spire is now non-ready until login succeeds");
+            Ok(())
+        }
+        AuthService::GitHub => {
+            anyhow::bail!("GitHub App removal is not implemented; no credential was removed")
+        }
+    }
+}
+
+async fn install_linear_credential(
+    paths: spire_application::ResolvedPaths,
+    credential_file: Option<PathBuf>,
+    rotation: bool,
+) -> Result<()> {
+    ensure_user_auth_profile(&paths)?;
+    let store = UserSecretStore::below_config_root(&paths.config_root);
+    if rotation && store.status(ManagedSecret::LinearApiKey)? != AuthenticationState::Configured {
+        anyhow::bail!("cannot rotate Linear authentication before a successful login")
+    }
+    let credential = read_secret_input(credential_file)?;
+    let adapter = LinearReadAdapter::from_token(credential.as_str().to_owned())
+        .context("failed to construct the Linear authentication probe")?;
+    let identity = adapter
+        .verify_viewer()
+        .await
+        .context("Linear credential verification failed; the prior credential remains active")?;
+    store
+        .replace(ManagedSecret::LinearApiKey, credential)
+        .context("failed to activate the verified Linear credential")?;
+    println!(
+        "Linear authentication {} for viewer {} in organization {}",
+        if rotation { "rotated" } else { "configured" },
+        identity.viewer_id,
+        identity.organization_id
+    );
+    Ok(())
+}
+
+fn ensure_user_auth_profile(paths: &spire_application::ResolvedPaths) -> Result<()> {
+    if paths.profile != spire_application::InstallationProfile::User {
+        anyhow::bail!(
+            "system-profile authentication requires its separate credential-store adapter; no user secret store was consulted"
+        )
+    }
+    Ok(())
+}
+
+fn read_secret_input(credential_file: Option<PathBuf>) -> Result<spire_application::SecretInput> {
+    match credential_file {
+        Some(path) => read_protected_secret_file(&path),
+        None => read_secret_from_tty(),
+    }
+}
+
+fn read_protected_secret_file(path: &std::path::Path) -> Result<spire_application::SecretInput> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("unable to inspect credential file {}", path.display()))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_file()
+        || metadata.uid() != Uid::current().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+    {
+        anyhow::bail!("credential file must be an owner-only regular 0600 file")
+    }
+    let value = fs::read_to_string(path)
+        .with_context(|| format!("unable to read credential file {}", path.display()))?;
+    Ok(spire_application::SecretInput::new(
+        value.trim_end_matches(['\r', '\n']).to_owned(),
+    ))
+}
+
+fn read_secret_from_tty() -> Result<spire_application::SecretInput> {
+    let mut terminal = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .context("a TTY or --credential-file is required to provide a credential")?;
+    terminal.write_all(b"Linear API key: ")?;
+    terminal.flush()?;
+    let original = termios::tcgetattr(&terminal).context("unable to read TTY settings")?;
+    let mut hidden = original.clone();
+    hidden.local_flags.remove(LocalFlags::ECHO);
+    termios::tcsetattr(&terminal, SetArg::TCSANOW, &hidden)
+        .context("unable to disable terminal echo")?;
+    let mut value = String::new();
+    let read_result = {
+        let mut reader = BufReader::new(&terminal);
+        reader.read_line(&mut value)
+    };
+    let restore_result = termios::tcsetattr(&terminal, SetArg::TCSANOW, &original);
+    terminal.write_all(b"\n")?;
+    restore_result.context("unable to restore terminal echo")?;
+    read_result.context("unable to read credential from the TTY")?;
+    Ok(spire_application::SecretInput::new(
+        value.trim_end_matches(['\r', '\n']).to_owned(),
+    ))
+}
+
+fn doctor(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Result<()> {
+    let mut findings = Vec::new();
+    findings.push(DiagnosticFinding::required(
+        "SPIRE-DIAG-001",
+        AuthenticationState::Configured,
+        "Spire paths resolved for the selected installation profile",
+        None,
+    ));
+
+    let configuration_state = match load_config(Some(&paths.config_file), false) {
+        Ok(_) => AuthenticationState::Configured,
+        Err(_) => AuthenticationState::Unavailable,
+    };
+    findings.push(DiagnosticFinding::required(
+        "SPIRE-DIAG-002",
+        configuration_state,
+        "configuration validation",
+        (configuration_state == AuthenticationState::Unavailable).then_some(format!(
+            "spire config validate --config {}",
+            paths.config_file.display()
+        )),
+    ));
+
+    if paths.profile == spire_application::InstallationProfile::User {
+        findings.extend(
+            secret_status_report(&UserSecretStore::below_config_root(&paths.config_root)).findings,
+        );
+    } else {
+        findings.push(DiagnosticFinding::required(
+            "SPIRE-AUTH-004",
+            AuthenticationState::Unsupported,
+            "system-profile secret-store diagnostics are not implemented",
+            Some("use the advanced system credential-store adapter".into()),
+        ));
+    }
+    findings.push(DiagnosticFinding::required(
+        "SPIRE-AUTH-005",
+        AuthenticationState::Unsupported,
+        "GitHub App authentication lifecycle is not implemented",
+        Some("complete GitHub App manifest onboarding and installation verification".into()),
+    ));
+    let report = DiagnosticReport::from_findings(findings);
+    print_diagnostic_report(&report, format)?;
+    if !report.ready {
+        anyhow::bail!("Spire diagnostics are not ready")
+    }
+    Ok(())
+}
+
+fn secret_status_report(store: &UserSecretStore) -> DiagnosticReport {
+    let finding = |code: &str, secret: ManagedSecret, provider: &str, remediation: &str| {
+        let state = store
+            .status(secret)
+            .unwrap_or(AuthenticationState::Ambiguous);
+        DiagnosticFinding::required(
+            code,
+            state,
+            format!("{provider} service credential bundle status"),
+            (!state.is_ready()).then_some(remediation.to_owned()),
+        )
+    };
+    DiagnosticReport::from_findings(vec![
+        finding(
+            "SPIRE-AUTH-001",
+            ManagedSecret::LinearApiKey,
+            "Linear",
+            "install or inspect the Linear service credential with spire auth",
+        ),
+        finding(
+            "SPIRE-AUTH-002",
+            ManagedSecret::GitHubAppPrivateKey,
+            "GitHub App private key",
+            "register the GitHub App with spire auth login github",
+        ),
+        finding(
+            "SPIRE-AUTH-003",
+            ManagedSecret::GitHubWebhookSecret,
+            "GitHub App webhook secret",
+            "register the GitHub App with spire auth login github",
+        ),
+    ])
+}
+
+fn print_diagnostic_report(report: &DiagnosticReport, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => print_json(report),
+        OutputFormat::Text => {
+            println!("ready: {}", report.ready);
+            for finding in &report.findings {
+                println!(
+                    "{}: {:?} — {}",
+                    finding.code, finding.state, finding.summary
+                );
+                if let Some(remediation) = &finding.remediation {
+                    println!("  remediation: {remediation}");
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 fn config_show(
@@ -1190,6 +1530,7 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+    use std::os::unix::fs::PermissionsExt;
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -1232,5 +1573,23 @@ mod tests {
         let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
         assert!(verify_github_signature(secret, &signature, body));
         assert!(!verify_github_signature(secret, &signature, b"{}"));
+    }
+
+    #[test]
+    fn protected_file_input_requires_user_only_permissions() {
+        let root = std::env::temp_dir().join(format!("spire-cli-secret-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let credential_file = root.join("linear-key");
+        fs::write(&credential_file, "SPIRE_SECRET_SENTINEL\n").unwrap();
+        fs::set_permissions(&credential_file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let credential = read_protected_secret_file(&credential_file).unwrap();
+
+        assert_eq!(credential.as_str(), "SPIRE_SECRET_SENTINEL");
+        assert!(!format!("{credential:?}").contains("SPIRE_SECRET_SENTINEL"));
+        fs::set_permissions(&credential_file, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_protected_secret_file(&credential_file).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 }

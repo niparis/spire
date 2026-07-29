@@ -46,7 +46,8 @@ pub struct LinearConfig {
     pub done_state_id: String,
     pub canceled_state_id: String,
     pub bot_actor_id: String,
-    pub credential_ref: String,
+    #[serde(default)]
+    pub credential_ref: Option<String>,
     pub complexity_mapping: BTreeMap<ComplexityEstimate, ComplexityClass>,
     pub supported_type_labels: Vec<String>,
     pub repository_mappings: Vec<RepositoryMapping>,
@@ -399,8 +400,10 @@ impl Config {
         ] {
             ensure_value(path, value)?;
         }
+        if let Some(reference) = self.linear.credential_ref.as_deref() {
+            ensure_credential_reference("linear.credential_ref", reference)?;
+        }
         for (path, reference) in [
-            ("linear.credential_ref", self.linear.credential_ref.as_str()),
             ("github.credential_ref", self.github.credential_ref.as_str()),
             (
                 "webhook.signing_secret_ref",
@@ -897,6 +900,12 @@ rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositori
             config.config.linear.state_kind("review"),
             Some(LinearStateKind::InReview)
         );
+    }
+
+    #[test]
+    fn user_configuration_can_omit_the_managed_linear_credential_reference() {
+        let input = VALID_CONFIG.replace("  credential_ref: env:LINEAR_TOKEN\n", "");
+        assert!(Config::from_yaml(&input).unwrap().validate().is_ok());
     }
 
     #[test]

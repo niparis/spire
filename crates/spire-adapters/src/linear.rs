@@ -29,7 +29,7 @@ pub struct LinearHealthDiagnostic {
     pub retry_after_seconds: Option<u64>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum LinearAdapterError {
     #[error("Linear credential reference is invalid")]
     InvalidCredentialReference,
@@ -39,6 +39,8 @@ pub enum LinearAdapterError {
     ClientConstruction,
     #[error("Linear authentication failed")]
     Authentication,
+    #[error("Linear permission was denied")]
+    PermissionDenied,
     #[error("Linear rate limit requires a pause of {retry_after_seconds:?} seconds")]
     RateLimited { retry_after_seconds: Option<u64> },
     #[error("Linear response exceeded the configured size limit")]
@@ -47,8 +49,18 @@ pub enum LinearAdapterError {
     Http(StatusCode),
     #[error("Linear response was malformed")]
     MalformedResponse,
+    #[error("Linear authentication response was ambiguous")]
+    AmbiguousAuthentication,
     #[error("Linear network request failed")]
     Network,
+}
+
+/// Non-secret identity evidence returned after a successful Linear `viewer`
+/// probe. The caller may retain this separately from the API key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinearViewerIdentity {
+    pub viewer_id: String,
+    pub organization_id: String,
 }
 
 pub struct LinearReadAdapter {
@@ -70,6 +82,12 @@ impl std::fmt::Debug for LinearReadAdapter {
 impl LinearReadAdapter {
     pub fn from_credential_reference(reference: &str) -> Result<Self, LinearAdapterError> {
         let token = load_credential(reference)?;
+        Self::from_token(token)
+    }
+
+    /// Builds the read-only adapter from a credential obtained by a managed
+    /// secret-store adapter. Callers must not log or persist the token.
+    pub fn from_token(token: String) -> Result<Self, LinearAdapterError> {
         let sdk = LinearSdkClient::from_token(token.clone())
             .map_err(|_| LinearAdapterError::ClientConstruction)?;
         let http = Client::builder()
@@ -119,10 +137,11 @@ impl LinearReadAdapter {
             diagnostic.last_rate_limit_remaining = remaining;
             diagnostic.retry_after_seconds = retry_after_seconds;
         }
-        if response.status() == StatusCode::UNAUTHORIZED
-            || response.status() == StatusCode::FORBIDDEN
-        {
+        if response.status() == StatusCode::UNAUTHORIZED {
             return Err(LinearAdapterError::Authentication);
+        }
+        if response.status() == StatusCode::FORBIDDEN {
+            return Err(LinearAdapterError::PermissionDenied);
         }
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             return Err(LinearAdapterError::RateLimited {
@@ -162,6 +181,11 @@ impl LinearReadAdapter {
     ) -> Result<CanonicalIssuePage, LinearAdapterError> {
         let data = self.request(ISSUES_QUERY, json!({"first": PAGE_SIZE, "after": query.cursor, "filter": {"team": {"id": {"eq": query.team_id}}, "state": {"id": {"in": query.workflow_state_ids}}}})).await?;
         parse_page(data.pointer("/data/issues").cloned().unwrap_or(Value::Null))
+    }
+
+    /// Verifies the current API key using the non-mutating `viewer` query.
+    pub async fn verify_viewer(&self) -> Result<LinearViewerIdentity, LinearAdapterError> {
+        normalize_viewer_probe(self.request(VIEWER_QUERY, json!({})).await?)
     }
 }
 
@@ -296,6 +320,61 @@ pub fn normalize_issue_fixture(
     }))
 }
 
+/// Converts a captured `viewer` response into non-secret identity evidence.
+/// Any undocumented provider error fails closed as ambiguous.
+pub fn normalize_viewer_probe(value: Value) -> Result<LinearViewerIdentity, LinearAdapterError> {
+    if let Some(errors) = value.get("errors").and_then(Value::as_array) {
+        return Err(classify_viewer_errors(errors));
+    }
+    let viewer = value
+        .pointer("/data/viewer")
+        .cloned()
+        .ok_or(LinearAdapterError::AmbiguousAuthentication)?;
+    let viewer_id = viewer
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(LinearAdapterError::MalformedResponse)?;
+    let organization_id = viewer
+        .pointer("/organization/id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(LinearAdapterError::MalformedResponse)?;
+    Ok(LinearViewerIdentity {
+        viewer_id: viewer_id.to_owned(),
+        organization_id: organization_id.to_owned(),
+    })
+}
+
+fn classify_viewer_errors(errors: &[Value]) -> LinearAdapterError {
+    let codes = errors
+        .iter()
+        .filter_map(|error| error.pointer("/extensions/code").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    if codes.iter().any(|code| {
+        matches!(
+            *code,
+            "AUTHENTICATION_ERROR" | "UNAUTHENTICATED" | "INVALID_TOKEN"
+        )
+    }) {
+        LinearAdapterError::Authentication
+    } else if codes
+        .iter()
+        .any(|code| matches!(*code, "FORBIDDEN" | "PERMISSION_DENIED"))
+    {
+        LinearAdapterError::PermissionDenied
+    } else if codes
+        .iter()
+        .any(|code| matches!(*code, "RATE_LIMITED" | "TOO_MANY_REQUESTS"))
+    {
+        LinearAdapterError::RateLimited {
+            retry_after_seconds: None,
+        }
+    } else {
+        LinearAdapterError::AmbiguousAuthentication
+    }
+}
+
 fn parse_page(value: Value) -> Result<CanonicalIssuePage, LinearAdapterError> {
     let raw: RawConnection<Value> =
         serde_json::from_value(value).map_err(|_| LinearAdapterError::MalformedResponse)?;
@@ -318,6 +397,7 @@ fn parse_page(value: Value) -> Result<CanonicalIssuePage, LinearAdapterError> {
 
 const ISSUE_QUERY: &str = "query Issue($id: String!) { issue(id: $id) { id identifier team { id } state { id } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } }";
 const ISSUES_QUERY: &str = "query Issues($first: Int!, $after: String, $filter: IssueFilter) { issues(first: $first, after: $after, filter: $filter) { nodes { id identifier team { id } state { id } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } pageInfo { hasNextPage endCursor } } }";
+const VIEWER_QUERY: &str = "query Viewer { viewer { id organization { id } } }";
 
 #[cfg(test)]
 mod tests {
@@ -328,5 +408,30 @@ mod tests {
         assert_eq!(issue.estimate, None);
         assert_eq!(issue.assignee_id, None);
         assert_ne!(issue.revision, issue.updated_at);
+    }
+
+    #[test]
+    fn viewer_probe_maps_captured_authentication_outcomes_without_secret_data() {
+        let authenticated = normalize_viewer_probe(
+            serde_json::json!({"data":{"viewer":{"id":"viewer","organization":{"id":"org"}}}}),
+        )
+        .unwrap();
+        assert_eq!(authenticated.viewer_id, "viewer");
+        assert_eq!(authenticated.organization_id, "org");
+
+        for (code, expected) in [
+            ("INVALID_TOKEN", LinearAdapterError::Authentication),
+            ("FORBIDDEN", LinearAdapterError::PermissionDenied),
+            (
+                "RATE_LIMITED",
+                LinearAdapterError::RateLimited {
+                    retry_after_seconds: None,
+                },
+            ),
+            ("UNDOCUMENTED", LinearAdapterError::AmbiguousAuthentication),
+        ] {
+            let response = serde_json::json!({"errors":[{"extensions":{"code":code}}]});
+            assert_eq!(normalize_viewer_probe(response), Err(expected));
+        }
     }
 }
