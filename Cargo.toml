@@ -27,8 +27,10 @@ lineark-sdk = "=3.0.3"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["macros", "migrate", "runtime-tokio-rustls", "sqlite"] }
 thiserror = "2.0.12"
+time = { version = "0.3.41", features = ["parsing"] }
 tokio = { version = "1.47.1", features = ["fs", "macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tower = { version = "0.5.2", features = ["util"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 uuid = { version = "1.17.0", features = ["serde", "v4"] }
+urlencoding = "2.1.3"
