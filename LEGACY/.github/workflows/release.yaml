@@ -1,0 +1,86 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: test before release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run tests
+        run: go test ./...
+
+  build-assets:
+    name: build (${{ matrix.asset_name }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            asset_name: spire_darwin_arm64
+            binary_name: spire
+          - goos: windows
+            goarch: amd64
+            asset_name: spire_windows_amd64.exe
+            binary_name: spire.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          VERSION="${RELEASE_VERSION#v}"
+          go build -trimpath -ldflags "-s -w -X 'opencode-spire/internal/cli.Version=${VERSION}'" -o "dist/${{ matrix.binary_name }}" ./cmd/spire
+
+      - name: Rename asset
+        run: mv "dist/${{ matrix.binary_name }}" "dist/${{ matrix.asset_name }}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  publish-release:
+    name: publish release assets
+    needs: build-assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: asset-*
+          merge-multiple: true
+          path: dist
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/spire_darwin_arm64
+            dist/spire_windows_amd64.exe
+          fail_on_unmatched_files: true

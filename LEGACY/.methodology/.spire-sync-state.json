@@ -1,0 +1,38 @@
+{
+  "hashes": {
+    "agents/DOCS_WRITER.md": "30732853c96a70dcefa17ca1519af1a0d7b6de9e046a232b9752d2edf086eecd",
+    "agents/FEATURE_PLANNER.md": "ed940cc8020773f1372e237fd418bd3fd46c0f7bc08a2208b6f2628523af764a",
+    "agents/INVESTIGATOR.md": "ccb04cf62858b38b6b00eef58e7d3469e00b48b2195154a70d8d77cc02223fd8",
+    "agents/SPEC_AUDITOR.md": "aa6a5e1d1d337736a9f632b99628db55e126dcfa32aaebd24fc2ffbe0a0665b0",
+    "agents/SPIRE.md": "77c113c04b5404ee3d9d95cd0475270ea2f77d6bcb27fadc7f06fbc3651c895f",
+    "agents/VERIFICATION.md": "c5162f478a7aa20d315edffc1f6a120d9e35dc2cfedd763992c62b20d5b6b155",
+    "project_root/local_agents.md": "88a8e79a7a9ddf8886c4f7c7288b5372b8ff7d83e7527068a7b6f39f2ef641cf",
+    "project_root/manifest.json": "1fa5140311771643e226f463eb59122a605d2aeee7d7c7bf66e38f66b163adb5",
+    "project_root/opencode.json": "01ffa630185de580f9c64bc873606f6ff69fade91ec8cf8396faf64207cb5280",
+    "skills/architecture-definition/SKILL.md": "3b9232413ed227ce5b2e8895eddb57f5e05e5f622eb4ffbedd165abe9b2c5167",
+    "skills/grill-me/SKILL.md": "cab30c7df24d5b516f575c4b50e56d6a563784db9221cb7ef22eda209c26e4dd",
+    "skills/implementation-loop/SKILL.md": "f6350c1583b2694fc09aa836197ecfbc447c3db9c31e1a9ac08b152b69731ddb",
+    "skills/new-feature/SKILL.md": "bc5d95c45ae96c9b83082ad0097b9ff557ac61180dc8bb2b7816eab40c45c06a",
+    "skills/product-definition/SKILL.md": "47d71b18d50da37d16c2864a27d866bc09b6671a7eef300e39c9f035600924a7",
+    "subagents/docs-writer.md": "c60d50cea30f7e4ccf49eb183bf91ef113b4a00478cc218580bc5b9b411f07ed",
+    "subagents/investigator.md": "2a09c8a6bd99db7f70b3a573135e60940dd7eb5af0b28d14f29b1c97407c8ebe",
+    "subagents/planner.md": "592753deccaa87c0c1106192d7d140a75921715d28831c59a60de0c6f4ec961f",
+    "subagents/spec-auditor.md": "fb32c5ec140816c36b338c6bdd44db15bf281bc7efca4c5484e695bd5a15b062",
+    "subagents/verifier.md": "349181599a74bda3bd649be9abc3e22e050f5766a3accbf5756d0b258751d561",
+    "templates/architecture-template.md": "9aac826e1803771535423b7df1ac901da61cb1e1388fffbd077859f964158b60",
+    "templates/product-template.md": "438738bf0b5aaaf7a858514570478dd91768e4ace237ae6449d9be90032e63b4",
+    "templates/session-template.md": "8aa298d405cfb61f11a02ed6b76fdd9e1724faad49d8f7d852aefcd51ae67280",
+    "templates/spec-template.md": "8c806f58e0209935953f0eb5d052c2ef1341c9b49822875a01f10141dcbdfa48"
+  },
+  "projections": {
+    ".opencode/agents/docs-writer.md": "",
+    ".opencode/agents/investigator.md": "",
+    ".opencode/agents/planner.md": "",
+    ".opencode/agents/spec-auditor.md": "",
+    ".opencode/agents/verifier.md": "",
+    ".opencode/skills/spire-architecture-definition/SKILL.md": "",
+    ".opencode/skills/spire-grill-me/SKILL.md": "",
+    ".opencode/skills/spire-new-feature/SKILL.md": "",
+    ".opencode/skills/spire-product-definition/SKILL.md": ""
+  }
+}
