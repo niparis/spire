@@ -33,9 +33,9 @@ pub enum GitHubAdapterError {
     InvalidResponse(String),
 }
 
-/// A credential must already be an installation access token. Minting a GitHub
-/// App token belongs to the approved secret-delivery boundary (for example a
-/// systemd credential refresher), not to request handling.
+/// Receives one short-lived installation token minted by `github_app`.
+/// The token remains in memory and is replaced by reconstructing this adapter
+/// after the provider refreshes it; it is never durable configuration.
 #[derive(Clone)]
 pub struct GitHubHttpAdapter {
     client: Client,
