@@ -1,0 +1,9 @@
+# Installed on the homelab VM as /etc/cloudflared/config.yml. The remotely
+# managed tunnel token is supplied through the systemd credential named
+# cloudflared-token and is never written here.
+# This file intentionally routes only the signed webhook endpoint to loopback.
+ingress:
+  - hostname: REPLACE_ME_WEBHOOK_HOSTNAME
+    path: /webhooks/linear
+    service: http://127.0.0.1:8080
+  - service: http_status:404
