@@ -93,16 +93,19 @@ Implementation:
 2. Check out the exact workflow SHA and run the canonical workspace gates:
    `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and
    `cargo test --workspace`.
-3. Build the distributable binary with
+3. Cache Cargo registry/Git downloads and `target/` artifacts by runner OS, target
+   triple, lockfile, and Rust toolchain. Restore a compatible source-only fallback;
+   never cache credentials or release outputs.
+4. Build the distributable binary with
    `cargo build --locked --release --package spire --target x86_64-unknown-linux-musl`
    for the confirmed initial target.
-4. Package only the `spire` executable, `LICENSE`, and a generated
+5. Package only the `spire` executable, `LICENSE`, and a generated
    `VERSION` file into a deterministic `tar.gz` archive named
    `spire-v<version>-x86_64-unknown-linux-musl.tar.gz`.
-5. Generate a SHA-256 manifest named `SHA256SUMS` beside the archive.
-6. Upload the archive, manifest, and build metadata as one Actions artifact named
+6. Generate a SHA-256 manifest named `SHA256SUMS` beside the archive.
+7. Upload the archive, manifest, and build metadata as one Actions artifact named
    `spire-v<version>-x86_64-unknown-linux-musl`.
-7. Set artifact retention explicitly and document its value; do not rely on the
+8. Set artifact retention explicitly and document its value; do not rely on the
    repository default.
 
 Verification:
