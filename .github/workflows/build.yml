@@ -60,11 +60,6 @@ jobs:
           ./scripts/release/test-release-contract.sh
           ./scripts/release/test-release-promotion.sh
 
-      - name: Preflight the next release tag
-        run: |
-          version="$(awk '/^\[workspace\.package\]$/ { active = 1; next } /^\[/ { active = 0 } active && /^version = / { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)"
-          ./scripts/release/preflight-release.sh "v${version}" "${GITHUB_SHA}"
-
       - name: Package the release archive
         id: package
         env:

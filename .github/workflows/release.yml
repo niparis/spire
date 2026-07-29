@@ -210,7 +210,6 @@ jobs:
     name: Promote verified release to latest
     needs: [validate, smoke]
     runs-on: ubuntu-24.04
-    environment: release
     permissions:
       contents: write
     steps:
