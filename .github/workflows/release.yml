@@ -13,48 +13,38 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  TARGET_TRIPLE: x86_64-unknown-linux-musl
+  RELEASE_TAG: ${{ github.ref_name }}
+  RELEASE_SHA: ${{ github.sha }}
+  WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  SUPPORTED_TARGETS: x86_64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin
 
 jobs:
-  release:
-    name: Verify and publish release assets
+  validate:
+    name: Read-only tag validation
     runs-on: ubuntu-24.04
-    environment: release
-    permissions:
-      contents: write
+    outputs:
+      release_tag: ${{ steps.contract.outputs.release_tag }}
+      source_sha: ${{ steps.contract.outputs.source_sha }}
     steps:
       - name: Check out the exact tag
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Restore Cargo downloads and build artifacts
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-v1-${{ runner.os }}-${{ env.TARGET_TRIPLE }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-v1-${{ runner.os }}-${{ env.TARGET_TRIPLE }}-
-
-      - name: Verify the triggering tag
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-          RELEASE_SHA: ${{ github.sha }}
+      - name: Verify tag, version, and source commit
+        id: contract
         run: |
-          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
           [[ "$(git rev-list -n 1 "${RELEASE_TAG}")" == "${RELEASE_SHA}" ]]
           ./scripts/release/verify-release.sh "${RELEASE_TAG}"
+          {
+            printf 'release_tag=%s\n' "${RELEASE_TAG}"
+            printf 'source_sha=%s\n' "${RELEASE_SHA}"
+          } >>"${GITHUB_OUTPUT}"
 
-      - name: Install the pinned Rust toolchain and Linux target
-        run: |
-          rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
-          rustup target add "${TARGET_TRIPLE}"
-          sudo apt-get update
-          sudo apt-get install --yes musl-tools
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
 
       - name: Check formatting
         run: cargo fmt --check
@@ -62,52 +52,184 @@ jobs:
       - name: Lint the workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test the workspace
-        run: cargo test --workspace
+      - name: Test the workspace and release fixtures
+        run: |
+          cargo test --workspace
+          ./scripts/release/test-release-contract.sh
+          ./scripts/release/test-release-promotion.sh
 
-      - name: Test release validation fixtures
-        run: ./scripts/release/test-release-contract.sh
+  build_target:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            setup: linux-musl
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            setup: native
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            setup: native
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out the exact validated source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
 
-      - name: Package the release archive
+      - name: Install the pinned Rust toolchain and target
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install Linux musl toolchain
+        if: matrix.setup == 'linux-musl'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Package and verify the native target
         id: package
         env:
-          DIST_DIR: ${{ github.workspace }}/dist
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: ./scripts/release/package-release.sh
-
-      - name: Verify the packaged binary version
-        env:
-          EXPECTED_VERSION: ${{ github.ref_name }}
-          BINARY: ${{ steps.package.outputs.binary }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+          DIST_DIR: ${{ github.workspace }}/dist/${{ matrix.target }}
         run: |
-          [[ "$("${BINARY}" --version)" == "spire ${EXPECTED_VERSION#v}" ]]
+          ./scripts/release/package-release.sh
+          [[ "$("${{ steps.package.outputs.binary }}" --version)" == "spire ${RELEASE_TAG#v}" ]]
 
-      - name: Publish or complete the draft release
+      - name: Upload isolated target candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: candidate-${{ matrix.target }}
+          path: ${{ github.workspace }}/dist/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 14
+
+  assemble:
+    name: Assemble immutable candidate
+    needs: [validate, build_target]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the exact validated source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Download isolated target candidates
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: candidate-*
+          path: candidates
+
+      - name: Assemble and verify the release-level asset set
+        run: |
+          INPUT_DIR="${GITHUB_WORKSPACE}/candidates" \
+          DIST_DIR="${GITHUB_WORKSPACE}/candidate" \
+          SOURCE_COMMIT="${{ needs.validate.outputs.source_sha }}" \
+          ./scripts/release/assemble-release.sh
+
+      - name: Add the installer to the candidate
+        run: cp install.sh candidate/install.sh
+
+      - name: Upload immutable candidate set
+        id: candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate-${{ needs.validate.outputs.release_tag }}
+          path: candidate
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Upload, verify, and publish candidate
+    needs: [validate, assemble]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact validated source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Download the approved candidate without rebuilding
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-candidate-${{ needs.validate.outputs.release_tag }}
+          path: candidate
+
+      - name: Create or resume a draft and verify uploaded bytes
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          ARCHIVE: ${{ steps.package.outputs.archive }}
+          CANDIDATE_DIR: ${{ github.workspace }}/candidate
+          INSTALLER_PATH: ${{ github.workspace }}/candidate/install.sh
+        run: ./scripts/release/publish-release.sh
+
+  smoke:
+    name: Public install smoke ${{ matrix.target }}
+    needs: [validate, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-apple-darwin
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Install the published version-pinned release publicly
+        env:
+          SPIRE_VERSION: ${{ needs.validate.outputs.release_tag }}
+          SPIRE_BIN_DIR: ${{ runner.temp }}/spire-bin
         run: |
-          if gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' >is_draft; then
-            if [[ "$(<is_draft)" != true ]]; then
-              printf 'release %s is already published; refusing to overwrite it\n' "${RELEASE_TAG}" >&2
-              exit 1
+          curl --fail --location --silent --show-error \
+            https://github.com/${{ github.repository }}/releases/download/${SPIRE_VERSION}/install.sh \
+            --output install.sh
+          sh install.sh
+          [[ "$("${SPIRE_BIN_DIR}/spire" --version)" == "spire ${SPIRE_VERSION#v}" ]]
+          [[ "$(find "${SPIRE_BIN_DIR}" -maxdepth 1 -type f | wc -l | tr -d ' ')" == 1 ]]
+
+  promote_latest:
+    name: Promote verified release to latest
+    needs: [validate, smoke]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Promote only the smoke-tested release
+        id: promote
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/release/promote-latest.sh "${{ needs.validate.outputs.release_tag }}"
+
+      - name: Verify latest installer alias and restore on failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPIRE_BIN_DIR: ${{ runner.temp }}/spire-latest-bin
+          EXPECTED_TAG: ${{ needs.validate.outputs.release_tag }}
+          PREVIOUS_LATEST: ${{ steps.promote.outputs.previous_latest }}
+        run: |
+          restore_previous() {
+            if [[ -n "${PREVIOUS_LATEST}" ]]; then
+              ./scripts/release/restore-latest.sh "${PREVIOUS_LATEST}"
             fi
-            gh release upload "${RELEASE_TAG}" \
-              "${ARCHIVE}" \
-              dist/SHA256SUMS \
-              dist/build-metadata.json \
-              install.sh \
-              --clobber
-          else
-            gh release create "${RELEASE_TAG}" \
-              "${ARCHIVE}" \
-              dist/SHA256SUMS \
-              dist/build-metadata.json \
-              install.sh \
-              --verify-tag \
-              --title "${RELEASE_TAG}" \
-              --generate-notes \
-              --draft
-          fi
-          gh release edit "${RELEASE_TAG}" --draft=false
+          }
+          trap restore_previous ERR
+          curl --fail --location --silent --show-error \
+            https://github.com/${{ github.repository }}/releases/latest/download/install.sh \
+            --output install.sh
+          sh install.sh
+          [[ "$("${SPIRE_BIN_DIR}/spire" --version)" == "spire ${EXPECTED_TAG#v}" ]]

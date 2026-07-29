@@ -25,6 +25,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Restore Cargo downloads and build artifacts
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
@@ -55,7 +56,14 @@ jobs:
         run: cargo test --workspace
 
       - name: Test release validation fixtures
-        run: ./scripts/release/test-release-contract.sh
+        run: |
+          ./scripts/release/test-release-contract.sh
+          ./scripts/release/test-release-promotion.sh
+
+      - name: Preflight the next release tag
+        run: |
+          version="$(awk '/^\[workspace\.package\]$/ { active = 1; next } /^\[/ { active = 0 } active && /^version = / { gsub(/"/, "", $3); print $3; exit }' Cargo.toml)"
+          ./scripts/release/preflight-release.sh "v${version}" "${GITHUB_SHA}"
 
       - name: Package the release archive
         id: package
