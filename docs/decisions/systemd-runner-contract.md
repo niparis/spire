@@ -12,7 +12,9 @@ VM must demonstrate the following before Sprint 05 starts.
 - A Run ID may only contain lowercase hexadecimal characters and hyphens; the
   runner rejects any other unit-name input.
 - The command is an explicit executable plus argument vector, never shell text.
-- `WorkingDirectory` is a canonical path below the configured workspace root.
+- `WorkingDirectory` is a canonical Spire-owned path below the configured
+  worktree root. Before launch, SQLite identity, the ownership marker, and
+  `git worktree list --porcelain` must agree.
 - Credentials arrive through systemd credentials or a dedicated runtime file; they
   are not inherited as broad process environment or logged.
 - Standard output and error go to a per-run evidence location outside the database
