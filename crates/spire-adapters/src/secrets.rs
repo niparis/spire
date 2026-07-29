@@ -13,7 +13,10 @@ use std::{
 };
 
 use nix::unistd::Uid;
-use spire_application::{AuthenticationState, ManagedSecret, SecretInput, SecretStorePort};
+use spire_application::{
+    AuthenticationMetadata, AuthenticationMetadataStorePort, AuthenticationState, ManagedSecret,
+    SecretInput, SecretStorePort,
+};
 use thiserror::Error;
 
 const MAX_BUNDLE_BYTES: usize = 16 * 1024;
@@ -62,6 +65,37 @@ impl UserSecretStore {
             .get(secret.key())
             .ok_or(UserSecretStoreError::Unavailable)?;
         Ok(SecretInput::new(value.clone()))
+    }
+
+    /// Activates a complete related credential set in one atomic bundle write.
+    pub fn replace_many(
+        &self,
+        replacements: Vec<(ManagedSecret, SecretInput)>,
+    ) -> Result<(), UserSecretStoreError> {
+        let _lock = self.acquire_lock()?;
+        let mut values = match self.read_bundle() {
+            Ok(values) => values,
+            Err(UserSecretStoreError::Unavailable) => BTreeMap::new(),
+            Err(error) => return Err(error),
+        };
+        let mut seen = BTreeMap::new();
+        for (secret, value) in replacements {
+            validate_value(value.as_str())?;
+            if seen.insert(secret.key(), ()).is_some() {
+                return Err(UserSecretStoreError::Malformed);
+            }
+            values.insert(secret.key().to_owned(), value.as_str().to_owned());
+        }
+        self.write_bundle(&values)
+    }
+
+    pub fn remove_many(&self, secrets: &[ManagedSecret]) -> Result<(), UserSecretStoreError> {
+        let _lock = self.acquire_lock()?;
+        let mut values = self.read_bundle()?;
+        for secret in secrets {
+            values.remove(secret.key());
+        }
+        self.write_bundle(&values)
     }
 
     fn read_bundle(&self) -> Result<BTreeMap<String, String>, UserSecretStoreError> {
@@ -129,6 +163,86 @@ impl UserSecretStore {
             let _ = fs::remove_file(&temporary);
         }
         write_result
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserAuthenticationMetadataStore {
+    path: PathBuf,
+}
+
+impl UserAuthenticationMetadataStore {
+    pub fn below_config_root(config_root: &Path) -> Self {
+        Self {
+            path: config_root.join("auth-metadata.json"),
+        }
+    }
+}
+
+impl AuthenticationMetadataStorePort for UserAuthenticationMetadataStore {
+    type Error = UserSecretStoreError;
+
+    fn load(&self) -> Result<AuthenticationMetadata, Self::Error> {
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&self.path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AuthenticationMetadata::default());
+            }
+            Err(_) => return Err(UserSecretStoreError::Unavailable),
+        };
+        validate_file_metadata(
+            &file
+                .metadata()
+                .map_err(|_| UserSecretStoreError::Unavailable)?,
+        )?;
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((MAX_BUNDLE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| UserSecretStoreError::Unavailable)?;
+        if bytes.len() > MAX_BUNDLE_BYTES {
+            return Err(UserSecretStoreError::Malformed);
+        }
+        serde_json::from_slice(&bytes).map_err(|_| UserSecretStoreError::Malformed)
+    }
+
+    fn store(&self, metadata: &AuthenticationMetadata) -> Result<(), Self::Error> {
+        let contents =
+            serde_json::to_vec_pretty(metadata).map_err(|_| UserSecretStoreError::Malformed)?;
+        if contents.len() > MAX_BUNDLE_BYTES {
+            return Err(UserSecretStoreError::Malformed);
+        }
+        let parent = self.path.parent().ok_or(UserSecretStoreError::Unsafe)?;
+        validate_directory(parent)?;
+        let temporary = parent.join(format!(
+            ".auth-metadata.{}.{}.tmp",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(|_| UserSecretStoreError::Unavailable)?;
+            file.write_all(&contents)
+                .map_err(|_| UserSecretStoreError::Unavailable)?;
+            file.sync_all()
+                .map_err(|_| UserSecretStoreError::Unavailable)?;
+            fs::rename(&temporary, &self.path).map_err(|_| UserSecretStoreError::Unavailable)?;
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| UserSecretStoreError::Unavailable)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 }
 
@@ -390,6 +504,55 @@ mod tests {
             Err(UserSecretStoreError::Busy)
         );
         drop(lock);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn github_bundle_and_non_secret_metadata_activate_atomically() {
+        let root = root("github-bundle");
+        let store = UserSecretStore::below_config_root(&root);
+        store
+            .replace_many(vec![
+                (
+                    ManagedSecret::GitHubAppPrivateKey,
+                    SecretInput::new("private-key".into()),
+                ),
+                (
+                    ManagedSecret::GitHubWebhookSecret,
+                    SecretInput::new("webhook-secret".into()),
+                ),
+            ])
+            .unwrap();
+        assert_eq!(
+            store.status(ManagedSecret::GitHubAppPrivateKey).unwrap(),
+            AuthenticationState::Configured
+        );
+        assert_eq!(
+            store.status(ManagedSecret::GitHubWebhookSecret).unwrap(),
+            AuthenticationState::Configured
+        );
+
+        let metadata_store = UserAuthenticationMetadataStore::below_config_root(&root);
+        let metadata = AuthenticationMetadata {
+            linear: None,
+            github: Some(spire_application::GitHubAuthenticationMetadata {
+                app_id: 42,
+                app_slug: "spire".into(),
+                client_id: "client".into(),
+                html_url: "https://github.com/settings/apps/spire".into(),
+                verified_at_unix: 1,
+            }),
+        };
+        metadata_store.store(&metadata).unwrap();
+        assert_eq!(metadata_store.load().unwrap(), metadata);
+        assert_eq!(
+            fs::metadata(root.join("auth-metadata.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         let _ = fs::remove_dir_all(root);
     }
 }
