@@ -32,6 +32,9 @@ Cloudflare Tunnel, Linear, and GitHub. Application code is not scaffolded yet.
   contracts, state machines, persistence, and failure policy.
 - The ordered roadmap is [`docs/sprints/README.md`](docs/sprints/README.md). Work
   from the current sprint document and satisfy its entry and exit criteria.
+- Before preparing, tagging, publishing, promoting, or recovering a release, read
+  [`docs/runbooks/release-promotion.md`](docs/runbooks/release-promotion.md) and
+  follow its authority, verification, and rollback gates.
 - If implementation disproves an assumption, update the architecture or
   implementation document and every affected sprint document in the same PR.
 - Preserve sprint work-package IDs. Record unresolved behavior under
