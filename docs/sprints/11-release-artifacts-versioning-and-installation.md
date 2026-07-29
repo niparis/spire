@@ -152,8 +152,13 @@ Create `README.md` as a concise operator-facing entry point. It must contain:
    (`x86_64-unknown-linux-musl`); configuration and provider credentials remain
    operator-owned.
 4. Source verification commands and the canonical CI gates.
-5. A version-pinned, checksum-verified installation example using the GitHub Release
-   asset, not an Actions artifact URL:
+5. A version-pinned shell-installer command that fetches `install.sh` from the same
+   immutable Git tag, downloads only the corresponding GitHub Release asset, and
+   verifies its SHA-256 checksum before installation. The installer requires an
+   explicit version, supports `SPIRE_BIN_DIR`, and fails clearly for an unsupported
+   platform.
+6. A version-pinned, checksum-verified manual installation example using the GitHub
+   Release asset, not an Actions artifact URL:
 
 ```sh
 version=v0.1.0 # replace with the chosen release tag
@@ -168,9 +173,9 @@ install -m 0755 spire "$HOME/.local/bin/spire"
 spire --version
 ```
 
-6. A note that `latest` URLs are intentionally not used in the primary command, so
+7. A note that `latest` URLs are intentionally not used in the primary command, so
    installations are reproducible and a human controls upgrades.
-7. Upgrade, rollback, and service-restart links to the Sprint 09 runbook. Do not
+8. Upgrade, rollback, and service-restart links to the Sprint 09 runbook. Do not
    place real credentials, tokens, or production configuration in the README.
 
 Verification:
