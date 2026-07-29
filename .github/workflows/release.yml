@@ -97,12 +97,14 @@ jobs:
               "${ARCHIVE}" \
               dist/SHA256SUMS \
               dist/build-metadata.json \
+              install.sh \
               --clobber
           else
             gh release create "${RELEASE_TAG}" \
               "${ARCHIVE}" \
               dist/SHA256SUMS \
               dist/build-metadata.json \
+              install.sh \
               --verify-tag \
               --title "${RELEASE_TAG}" \
               --generate-notes \

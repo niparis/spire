@@ -155,11 +155,11 @@ Create `README.md` as a concise operator-facing entry point. It must contain:
    (`x86_64-unknown-linux-musl`); configuration and provider credentials remain
    operator-owned.
 4. Source verification commands and the canonical CI gates.
-5. A version-pinned shell-installer command that fetches `install.sh` from the same
-   immutable Git tag, downloads only the corresponding GitHub Release asset, and
-   verifies its SHA-256 checksum before installation. The installer requires an
-   explicit version, supports `SPIRE_BIN_DIR`, and fails clearly for an unsupported
-   platform.
+5. A shell-installer command following the standard one-line pattern:
+   `curl -LsSf https://github.com/niparis/spire/releases/latest/download/install.sh | sh`.
+   The release workflow publishes `install.sh` with each release; the script resolves
+   the latest tag, verifies its corresponding GitHub Release archive by SHA-256, and
+   supports `SPIRE_BIN_DIR` while failing clearly for an unsupported platform.
 6. A version-pinned, checksum-verified manual installation example using the GitHub
    Release asset, not an Actions artifact URL:
 

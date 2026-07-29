@@ -63,9 +63,8 @@ fi
 
 printf 'release contract fixtures pass\n'
 
-"${installer}" --help >/dev/null
-"${installer}" --version "${tag}" --dry-run >/dev/null
-if "${installer}" --version invalid --dry-run >/dev/null 2>&1; then
+SPIRE_VERSION="${tag}" SPIRE_INSTALL_DRY_RUN=1 "${installer}" >/dev/null
+if SPIRE_VERSION=invalid SPIRE_INSTALL_DRY_RUN=1 "${installer}" >/dev/null 2>&1; then
   printf 'invalid installer version unexpectedly passed validation\n' >&2
   exit 1
 fi

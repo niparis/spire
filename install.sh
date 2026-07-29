@@ -2,64 +2,30 @@
 set -eu
 
 repository="niparis/spire"
-version=""
 bin_dir="${SPIRE_BIN_DIR:-${HOME}/.local/bin}"
-
-usage() {
-  cat <<'EOF'
-Install a versioned Spire Linux x86_64 release.
-
-Usage: install.sh --version v<major>.<minor>.<patch> [--bin-dir PATH] [--dry-run]
-
-Options:
-  --version TAG   Required GitHub Release tag, for example v0.1.0.
-  --bin-dir PATH  Installation directory (default: $SPIRE_BIN_DIR or ~/.local/bin).
-  --dry-run       Print the release URLs without downloading or installing.
-  --help          Show this help text.
-EOF
-}
 
 fail() {
   printf 'spire installer: %s\n' "$*" >&2
   exit 1
 }
 
-dry_run=false
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --version)
-      [ "$#" -ge 2 ] || fail "--version requires a tag"
-      version="$2"
-      shift 2
-      ;;
-    --bin-dir)
-      [ "$#" -ge 2 ] || fail "--bin-dir requires a path"
-      bin_dir="$2"
-      shift 2
-      ;;
-    --dry-run)
-      dry_run=true
-      shift
-      ;;
-    --help)
-      usage
-      exit 0
-      ;;
-    *)
-      fail "unknown option: $1"
-      ;;
-  esac
-done
+[ "$#" -eq 0 ] || fail "this installer takes no arguments"
 
-[ -n "${version}" ] || fail "--version is required"
+command -v curl >/dev/null 2>&1 || fail "curl is required"
+
+version="${SPIRE_VERSION:-}"
+if [ -z "${version}" ]; then
+  latest_release_url="$(curl -LsSf -o /dev/null -w '%{url_effective}' "https://github.com/${repository}/releases/latest")"
+  version="${latest_release_url##*/}"
+fi
 printf '%s\n' "${version}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-  || fail "version must be v<major>.<minor>.<patch>"
+  || fail "could not resolve a valid latest release tag"
 
 target="x86_64-unknown-linux-musl"
 archive="spire-${version}-${target}.tar.gz"
 base_url="https://github.com/${repository}/releases/download/${version}"
 
-if [ "${dry_run}" = true ]; then
+if [ "${SPIRE_INSTALL_DRY_RUN:-}" = 1 ]; then
   printf 'archive: %s/%s\n' "${base_url}" "${archive}"
   printf 'checksums: %s/SHA256SUMS\n' "${base_url}"
   printf 'destination: %s/spire\n' "${bin_dir}"
@@ -72,7 +38,6 @@ case "$(uname -m)" in
   *) fail "only Linux x86_64 is supported" ;;
 esac
 
-command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 command -v install >/dev/null 2>&1 || fail "install is required"
