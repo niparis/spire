@@ -2,6 +2,7 @@
 
 //! Use-case contracts and configuration validation for Spire.
 
+pub mod authentication;
 pub mod claim;
 pub mod config;
 pub mod config_migration;
@@ -19,6 +20,7 @@ pub mod rollout;
 pub mod scheduler;
 pub mod webhook;
 
+pub use authentication::*;
 pub use claim::*;
 pub use config::*;
 pub use config_migration::*;
