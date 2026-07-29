@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Spire SQLite restore drill
+
+[Timer]
+OnCalendar=Sun *-*-* 04:11:00
+Persistent=true
+Unit=spire-restore-drill.service
+
+[Install]
+WantedBy=timers.target
