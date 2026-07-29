@@ -13,7 +13,7 @@ workspace_version() {
   awk '
     /^\[workspace\.package\]$/ { in_workspace_package = 1; next }
     /^\[/ { in_workspace_package = 0 }
-    in_workspace_package && /^version = "[0-9]+\.[0-9]+\.[0-9]+"$/ {
+    in_workspace_package && /^version = "[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?"$/ {
       value = $0
       sub(/^version = "/, "", value)
       sub(/"$/, "", value)
@@ -39,7 +39,7 @@ readonly version="$(workspace_version)"
   printf 'workspace package version is missing from %s\n' "${cargo_toml}" >&2
   exit 1
 }
-[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || {
   printf 'workspace version is not a release SemVer version: %s\n' "${version}" >&2
   exit 1
 }
