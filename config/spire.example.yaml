@@ -21,7 +21,10 @@ linear:
   repository_mappings: []
 
 github:
+  # app_id: 123456 # required only for the advanced system profile
   installation_id: REPLACE_ME_GITHUB_APP_INSTALLATION_ID
+  # Advanced system installations resolve these through systemd credentials.
+  # Default user installations omit them and use `spire auth login github`.
   credential_ref: systemd:credentials/github-app-private-key
   webhook_secret_ref: systemd:credentials/github-webhook-secret
   request_timeout_seconds: 30
