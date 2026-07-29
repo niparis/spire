@@ -1,7 +1,7 @@
 # AI Harness Orchestrator Implementation Design
 
 **Path:** `docs/ai_harness_implementation.md`  
-**Last Verified:** 2026-07-28  
+**Last Verified:** 2026-07-29
 **Purpose:** Define the software that observes Linear, claims eligible tickets, schedules Code Harness runs, enforces concurrency, coordinates CI and independent review, reconciles missed events, and cleans up terminal runs.
 
 ## Overview
@@ -223,7 +223,9 @@ HarnessRunnerPort
   collect_result(external_run_id) -> normalized_result
 
 WorkspacePort
-  allocate(work_item, run_id) -> workspace
+  prepare_repository(mapping) -> repository_status
+  allocate_maker(work_item_id, root_run_id, base_sha) -> workspace
+  allocate_review(review_cycle_id, head_sha) -> workspace
   inspect(workspace_id) -> status
   quarantine(workspace_id, reason)
   cleanup(workspace_id)
@@ -488,8 +490,11 @@ The Orchestrator starts a harness through a normalized contract:
   "repository": {
     "name": "owner/repository",
     "base_branch": "main",
-    "branch": "agent/ABC-123-short-slug",
-    "workspace_path": "/controlled/path"
+    "base_sha": "sha",
+    "workspace_id": "uuid",
+    "workspace_kind": "maker",
+    "branch": "spire/abc-123-rootrunsuffix",
+    "workspace_path": "/controlled/worktree/path"
   },
   "cycle": 1,
   "pull_request": null,
@@ -521,6 +526,14 @@ Review runs additionally require:
     "base_sha": "sha",
     "head_sha": "sha"
   },
+  "repository": {
+    "name": "owner/repository",
+    "workspace_id": "uuid",
+    "workspace_kind": "review",
+    "branch": null,
+    "workspace_path": "/controlled/review-worktree",
+    "head_sha": "sha"
+  },
   "ci_evidence": {
     "required_checks": "all successful",
     "workflow_urls": []
@@ -549,7 +562,7 @@ no healthy different-harness candidate exists
   "provider": "codex",
   "outcome": "pr_ready",
   "external_run_id": "provider-specific-id",
-  "branch": "agent/ABC-123-short-slug",
+  "branch": "spire/abc-123-rootrunsuffix",
   "head_sha": "sha",
   "pull_request_url": "https://github.com/owner/repository/pull/123",
   "summary": "Implemented and verified the requested change.",
@@ -1216,7 +1229,7 @@ transaction:
 outbox worker:
   12. Confirm Linear transition and comment.
   13. Mark WorkItem queued.
-  14. Allocate workspace.
+  14. Persist and allocate the root attempt's maker branch/worktree.
   15. Start harness through HarnessRunnerPort.
   16. After successful mutating-run launch, mark the maker harness sticky.
 ```
@@ -1246,7 +1259,7 @@ delivery uniqueness.
 
 ```text
 1. Claim ticket and reserve capacity.
-2. Allocate isolated branch/worktree and environment.
+2. Allocate the root attempt's Spire-owned maker branch/worktree and environment.
 3. Start the selected maker triplet from the persisted dispatch decision.
 4. Record external run ID.
 5. Renew lease while runner reports progress.
@@ -1277,7 +1290,8 @@ must return a schema-validated result or classify the run as a contract failure.
    d. persist the candidate evaluation and selected review triplet
    e. acquire total and AI-initiated capacity
    f. create an AI-initiated child run whose parent is the implementation run
-   g. start the fresh checker run; otherwise wait for provider capacity
+   g. allocate a fresh detached reviewer worktree at the exact head SHA
+   h. start the fresh checker run; otherwise wait for provider capacity
 5. Collect schema-validated review result.
 6. Re-fetch current PR head.
 7. If head changed: discard result as stale.
@@ -1422,15 +1436,27 @@ review its own work. No capacity failure consumes a CI or review correction roun
 
 ### Workspace lifecycle and cleanup
 
+The registered local repository is a Git worktree source. Harnesses never run in
+or clean that checkout. Spire may fetch refs and maintain worktree metadata through
+the Git adapter, but it does not edit files, switch the source checkout's branch,
+reset it, or clean it.
+
 Each workspace record contains:
 
 ```text
 id
-run_id
+kind: maker | review
+root_run_id
+review_cycle_id?
 repository
-branch
+repository_source_path
+git_common_directory
+base_sha
+head_sha?
+branch?
 path
 ownership_marker
+allocation_state
 created_at
 last_used_at
 state
@@ -1438,13 +1464,37 @@ cleanup_after
 cleanup_attempts
 ```
 
-Allocation requirements:
+Maker allocation requirements:
 
 - Path below one configured workspace root.
-- Unique run-owned directory.
-- Ownership marker containing run and ticket IDs.
-- Repository and base revision recorded before use.
+- One unique worktree and branch per root implementation attempt.
+- Branch convention
+  `spire/<sanitized-linear-identifier>-<root-run-short-id>`.
+- Same-harness continuations and correction runs reuse the root workspace.
+- Ownership marker containing workspace, work item, and root Run IDs.
+- Repository, Git common directory, base branch, and exact base SHA recorded before
+  use.
 - Per-workspace environment namespace for ports, containers, caches, and test data.
+
+Reviewer allocation requirements:
+
+- Fresh path below the controlled review-worktree root.
+- Detached worktree at the exact CI-green/current PR head SHA.
+- Ownership marker containing workspace and review-cycle IDs.
+- No maker branch ownership and no reuse of the maker worktree.
+- Modification detection before accepting the review result.
+
+Allocation and recovery:
+
+```text
+1. Persist allocation intent and expected Git identities in SQLite.
+2. Commit; hold no transaction across Git or filesystem IO.
+3. Execute explicit Git worktree commands through WorkspacePort.
+4. Write the exact ownership marker.
+5. Inspect `git worktree list --porcelain` and filesystem state.
+6. Mark ready only when SQLite, Git metadata, path, and marker agree.
+7. After a crash, adopt only an exact match; quarantine every ambiguity.
+```
 
 Cleanup eligibility:
 
@@ -1466,14 +1516,17 @@ Cleanup algorithm:
 ```text
 1. Revalidate the path is within the configured workspace root.
 2. Verify the ownership marker matches the database record.
-3. Verify no active lease or process references the workspace.
-4. Use the workspace adapter's safe removal operation.
-5. Prune repository worktree metadata.
-6. Record reclaimed bytes and completion.
+3. Verify Git common directory and `git worktree list` identify the same worktree.
+4. Verify no active lease, process, Run, or review cycle references the workspace.
+5. Use `git worktree remove` through the workspace adapter.
+6. Run bounded `git worktree prune`.
+7. Record reclaimed bytes and completion.
 ```
 
 Disk pressure may accelerate cleanup of completed work, but must not delete active or
-unowned directories.
+unowned directories. Local worktree cleanup never implies branch deletion. Retain
+any local or remote branch required by an open PR; branch deletion requires a
+separate explicit policy after canonical PR terminal state is recorded.
 
 ### Status and comment ownership
 
@@ -1821,6 +1874,7 @@ high-level roadmap.
 | P0 | Cloudflare tunnel hostname and access policy | Linear requires stable public HTTPS while admin APIs must remain private |
 | P0 | GitHub App versus bot token | Determines webhook installation, check publishing, and repository permissions |
 | P0 | Who commits and pushes: harness or mechanical publisher | Defines the most important credential boundary |
+| P0 | Git worktree allocation/recovery proof | The accepted worktree-first contract still needs Git-aware allocation, detached review, restart reconciliation, and cleanup evidence |
 | P0 | Exact Linear readiness contract | A status alone may not prove specification quality or repository routing |
 | P0 | Human conflict policy | The reconciler must know when not to overwrite a recent human status change |
 | P0 | Review waiver mechanism | False positives need an authenticated, SHA-bound escape hatch |
@@ -1843,9 +1897,11 @@ high-level roadmap.
 
 ## Testing
 
-**Test files:** Not yet created  
-**Coverage:** No implementation exists  
-**Run:** `cargo test --workspace` is the proposed project-level command
+**Test files:** Unit and adapter tests exist in the Cargo workspace; Git worktree
+integration fixtures remain to be added.
+**Coverage:** Core policy and SQLite contracts have automated coverage. The
+worktree-first Git lifecycle is not implemented or proven on the target VM.
+**Run:** `cargo test --workspace` is the canonical project-level command.
 
 ### Domain tests
 
@@ -1933,11 +1989,20 @@ high-level roadmap.
 ### Workspace tests
 
 - Allocation never escapes the configured root.
+- Maker allocation creates a Git-recognized worktree and deterministic branch from
+  the recorded base SHA without modifying the registered source checkout.
+- Child continuation and correction runs reuse the root attempt's maker worktree.
+- Review allocation creates a fresh detached worktree at the requested head SHA.
+- Reviewer worktree modification fails the review contract.
+- Crash recovery adopts only matching SQLite, Git metadata, path, and ownership
+  marker state.
 - Cleanup refuses a missing or mismatched ownership marker.
+- Cleanup refuses a Git common-directory or worktree-metadata mismatch.
 - Cleanup refuses an active lease or process.
 - Completed work cleans after retention.
 - Blocked work retains evidence for the longer period.
 - Disk-pressure cleanup never removes active/unowned paths.
+- Worktree cleanup never deletes a branch required by an open PR.
 
 ### End-to-end failure drills
 
@@ -1963,6 +2028,12 @@ high-level roadmap.
 16. Exhaust the preferred checker and confirm fallback never selects the maker.
 17. Return an unrecognized provider-limit message and confirm the system fails
     closed, preserves evidence, and alerts instead of looping.
+18. Run two root attempts from one registered repository and confirm distinct
+    worktrees without a source-checkout change.
+19. Kill allocation between SQLite intent and `git worktree add`, restart, and
+    confirm exact recovery or quarantine without duplicate branch/worktree state.
+20. Run review at one head SHA, push a new SHA, and confirm a new detached reviewer
+    worktree is required.
 
 Pilot success requires every drill to converge to an explainable state without
 duplicate implementation or same-provider review.
@@ -1970,6 +2041,8 @@ duplicate implementation or same-provider review.
 ## Evidence Sources
 
 - Architecture source: [`ai_harness_architecture.md`](ai_harness_architecture.md).
+- Worktree ownership decision:
+  [`decisions/worktree-first-workspace-ownership.md`](decisions/worktree-first-workspace-ownership.md).
 - Product-foundation source: [`product_foundation.md`](product_foundation.md).
 - Review-loop source: [`shadowsong1.md`](shadowsong1.md).
 - Harness-workflow source: [`shadowsong2.md`](shadowsong2.md).
@@ -1983,6 +2056,8 @@ duplicate implementation or same-provider review.
   estimate and scheduler-owned dispatch rules select harness/model/effort.
 - User decision on 2026-07-28 that dispatch must understand harness behavior when
   token capacity is exhausted.
+- User decision on 2026-07-29 that Spire defaults to Git worktrees for harness
+  execution.
 - [Linear Webhooks](https://linear.app/developers/webhooks): public HTTPS requirement, five-second response requirement, delivery IDs, signatures, timestamps, retry schedule, and webhook-disable behavior.
 - [Linear rate limiting](https://linear.app/developers/rate-limiting): recommendation to avoid broad polling, filtered query guidance, and request/complexity limits.
 - [Linear webhook SDK](https://linear.app/developers/sdk-webhooks): signature-verified webhook handling and raw-body requirements.
@@ -2010,7 +2085,9 @@ duplicate implementation or same-provider review.
   installed Claude Code exposes `--output-format stream-json`, `--model`,
   `--effort`, `--fallback-model`, `--resume`, and `--session-id`. Help output
   verifies interface availability, not capacity-error behavior.
-- No implementation source files, database, deployed infrastructure, Linear workspace configuration, GitHub settings, or live provider runs were available for inspection.
+- Current application source, migrations, deployment documents, and workspace
+  adapter were inspected when the worktree-first contract was added. Live
+  target-VM worktree and provider runs remain unverified.
 - Nothing inside `LEGACY/` was read.
 
 ## Unknown / Unverified
@@ -2034,6 +2111,9 @@ duplicate implementation or same-provider review.
   reset timestamps have not been captured.
 - **Harness runner:** systemd transient units are recommended but not proven with
   both Claude Code and Codex.
+- **Worktree execution:** The current allocator is directory-only; Git worktree
+  allocation, detached review worktrees, and crash reconciliation remain to be
+  implemented and proven on the target VM.
 - **Heartbeat:** It is unverified whether each chosen harness surface exposes enough state for the proposed heartbeat and recovery model.
 - **Publication:** It is undecided whether a harness pushes directly or a separate publisher applies its patch.
 - **Specification readiness:** The exact required Linear fields and repository mapping are undecided.

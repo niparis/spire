@@ -1,6 +1,6 @@
 # AI Code Harness Architecture
 
-**Last Verified:** 2026-07-28  
+**Last Verified:** 2026-07-29
 **Audience:** Engineers, architects, and operators of the coding workflow  
 **Scope:** The orchestrator that discovers and claims Linear work, controls concurrent Code Harness runs, reconciles external state, drives independent review, and cleans up completed execution resources
 
@@ -10,7 +10,8 @@
 - Work whose normal completion boundary is a pull request.
 - Repositories with deterministic lint, typecheck, test, and build commands.
 - Work that benefits from independent maker/checker review before human review.
-- Parallel ticket execution where each run can use an isolated branch and worktree.
+- Parallel ticket execution where each root attempt uses a Spire-owned worktree and
+  maker branch.
 
 ## When not to use
 
@@ -96,7 +97,8 @@ flowchart TB
     subgraph Execution["Per-ticket execution"]
         Maker["Implementation Harness<br/>Claude Code or Codex"]
         Checker["Review Harness<br/>fresh Claude Code or Codex run"]
-        Workspace["Isolated branch and worktree"]
+        MakerWorkspace["Maker worktree<br/>Spire-owned branch"]
+        ReviewWorkspace["Reviewer worktree<br/>detached at head SHA"]
     end
 
     subgraph SourceControl["Source control"]
@@ -110,11 +112,13 @@ flowchart TB
     Orchestrator <--> Store
     Orchestrator --> Maker
     Repository --> Maker
-    Maker <--> Workspace
-    Workspace --> PullRequest
+    Maker <--> MakerWorkspace
+    MakerWorkspace --> PullRequest
     PullRequest --> Actions
     Actions --> Orchestrator
     Orchestrator -->|"Green"| Checker
+    Orchestrator --> ReviewWorkspace
+    ReviewWorkspace --> Checker
     Repository --> Checker
     PullRequest --> Checker
     Checker -->|"Findings"| Orchestrator
@@ -131,7 +135,7 @@ flowchart TB
 | Repository contracts | Markdown, repository configuration, optional OpenSpec | Acceptance criteria, ADRs, conventions, commands, and definition of done | Shared, versioned, and provider-independent |
 | Implementation Harness | Claude Code or Codex | Inspect, plan, implement, test, self-review, commit, push, and open/update a draft PR | One isolated run per ticket; harness may use internal subagents |
 | Review Harness | Different provider from the Implementation Harness | Independently inspect the current PR revision and return an approval or actionable findings | One stateless run per reviewed PR SHA |
-| Workspace | Git branch and worktree | Isolate concurrent changes and mutable development state | One workspace per active ticket |
+| Workspace | Git worktrees plus a Spire-owned maker branch | Isolate maker changes per root attempt and reviewer state per reviewed SHA without mutating the registered source checkout | One persistent maker worktree per root attempt; one detached reviewer worktree per review cycle |
 | CI | GitHub Actions | Objective lint, typecheck, test, build, and other required checks | One workflow execution per PR revision |
 | Merge control | GitHub branch protection and human approval | Prevent merge until objective and judgment gates pass | Merge queue may be added when concurrent PR volume requires it |
 
@@ -251,6 +255,29 @@ limits.
 **Consequences:** Phase splitting, subagent selection, fresh internal contexts, retries, and implementation tactics remain harness decisions. The system cannot depend on one provider's internal agent topology.  
 **Date:** 2026-07-28
 
+### Worktree-first execution is owned by Spire
+
+**Context:** Branches identify publishable Git lineage, while worktrees isolate
+mutable local files. Letting Linear or a harness select either would give untrusted
+or provider-specific input control over durable resources. Running in the
+operator's registered checkout would also prevent safe concurrent work.
+
+**Decision:** Spire allocates every harness a Git worktree. One maker worktree and
+Spire-generated branch belong to the root implementation attempt and survive
+continuations/corrections. Each review cycle receives a separate detached worktree
+at the exact CI-green head SHA. Linear supplies no branch name, path, or workspace
+instruction.
+
+**Rationale:** Spire already owns admission, leases, recovery, and cleanup, so it
+must also own the resource identities those operations protect. Worktrees give
+filesystem isolation while branches retain PR lineage.
+
+**Consequences:** The registered local repository is a worktree source, not an
+autonomous execution directory. Allocation intent and exact Git identities are
+persisted in SQLite. Local worktree cleanup and branch deletion are separate
+policies. Git/worktree operations remain adapter concerns.
+**Date:** 2026-07-29
+
 ### Specification verification is harness behavior
 
 **Context:** A specification may contain stale file paths, identifiers, or assumptions.  
@@ -280,7 +307,9 @@ limits.
 **Context:** Allowing the checker to edit the implementation weakens role separation and makes authorship unclear.  
 **Decision:** The Review Harness is read-only with respect to the branch. It returns a verdict and findings. The Implementation Harness owns all code changes.  
 **Rationale:** This preserves a clear maker/checker relationship and an auditable correction loop.  
-**Consequences:** A rejected revision requires another maker pass, another CI execution, and another fresh review.
+**Consequences:** A rejected revision requires another maker pass, another CI
+execution, and another fresh review. The reviewer receives a detached worktree at
+the reviewed SHA, not the maker's worktree or branch checkout.
 **Date:** 2026-07-28
 
 ### CI and AI review are different gates
@@ -454,7 +483,11 @@ The human may explicitly waive a disputed finding. The waiver must be visible on
 
 ### Isolation
 
-- Each active ticket uses its own branch and worktree.
+- Each root implementation attempt uses one Spire-owned maker branch and worktree.
+- Same-harness continuations and correction runs reuse that maker worktree.
+- Each review cycle uses a fresh detached worktree at the exact CI-green head SHA.
+- The registered source checkout is never a harness working directory or cleanup
+  target.
 - Mutable services, ports, databases, caches, and environment files must be isolated per run when relevant.
 - The review run is isolated from the implementation conversation and workspace state.
 - The review run uses a different provider from the implementation run.
@@ -534,6 +567,10 @@ Validate the workflow with a controlled pilot:
     candidate in the matched rule is selected.
 13. Exhaust a maker after it has changed the branch and confirm the work pauses
     without silently switching harnesses or consuming a correction round.
+14. Run two maker attempts from one registered repository and confirm they use
+    distinct worktrees without changing the registered checkout.
+15. Review a CI-green SHA from a fresh detached worktree and fail the review
+    contract if that worktree changes.
 
 ## Non-Goals
 
@@ -552,6 +589,8 @@ Validate the workflow with a controlled pilot:
 
 ## Evidence Sources
 
+- Accepted workspace decision:
+  [`decisions/worktree-first-workspace-ownership.md`](decisions/worktree-first-workspace-ownership.md).
 - Documentation synthesis from [`product_foundation.md`](product_foundation.md), especially its CI, ticket-state, isolation, draft-PR, and human-merge boundaries.
 - Review-orchestration lessons from [`shadowsong1.md`](shadowsong1.md), especially the need for fresh review, hard exit conditions, debouncing, and explicit failure handling.
 - Harness and artifact boundaries from [`shadowsong2.md`](shadowsong2.md), especially specification verification, isolated execution, and maker/checker separation.
@@ -567,6 +606,8 @@ Validate the workflow with a controlled pilot:
 - User decision on 2026-07-28 to bound concurrent AI-initiated workloads separately
   at one, bound total harness workloads at three, make both values configurable,
   and not use hourly/daily launch quotas.
+- User decision on 2026-07-29 that Spire defaults to Git worktrees for harness
+  execution.
 - [Linear Webhooks](https://linear.app/developers/webhooks) and
   [rate-limit guidance](https://linear.app/developers/rate-limiting), supporting
   webhook-first intake with narrow reconciliation.
@@ -580,7 +621,9 @@ Validate the workflow with a controlled pilot:
   while later work waits for credit or reset.
 - [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/),
   supporting outbound-only public ingress to the homelab VM.
-- No application code, CI configuration, tracker configuration, or runtime behavior was inspected for this document.
+- Current application code and deployment documentation were inspected when the
+  worktree-first decision was added; live target-VM Git worktree behavior remains
+  unverified.
 
 ## Unknown / Unverified
 
@@ -597,6 +640,8 @@ Validate the workflow with a controlled pilot:
   webhook-path exposure have not been configured.
 - **Harness runner:** systemd transient units are selected for the first design but
   have not been proven with Claude Code and Codex.
+- **Worktree adapter:** The current allocator creates a directory and ownership
+  marker but does not yet execute or reconcile Git worktree operations.
 - **Repository commands:** Actual lint, typecheck, test, and build commands have not been inspected.
 - **Tracker integration:** Existing Linear statuses, labels, permissions, and GitHub synchronization have not been verified.
 - **Harness permissions:** Current Claude Code or Codex authentication and GitHub scopes have not been verified.

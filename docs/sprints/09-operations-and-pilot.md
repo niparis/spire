@@ -125,10 +125,9 @@ Implementation:
 
 1. Select only terminal Workspaces past configured retention.
 2. Verify ownership marker, database identity, no active lease, and no live unit.
-3. Refuse unresolved/symlink-escaped paths.
+3. Refuse unresolved/symlinked/out-of-root paths.
 4. Remove worktree through Git-aware operation.
-5. Remove branch only under explicit policy; never delete a remote branch needed by
-   an open PR.
+5. Remove branch only under explicit policy and never if an open PR needs it.
 6. Record reclaimed bytes and terminal cleanup state.
 7. Quarantine failures.
 

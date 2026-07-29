@@ -39,6 +39,8 @@ metadata, and persists Linear-project-to-repository authority in SQLite.
 - External writes are delivered from an outbox and are idempotent.
 - Enabled SQLite project mappings are the repository-routing authority; ticket
   content cannot expand it.
+- Spire-owned Git worktrees are the default harness execution boundary; Linear
+  cannot choose branch or workspace identity.
 - Default onboarding reuses the login user's provider-native Codex, Claude Code,
   Git, and SSH authentication.
 - No work in this plan requires reading or migrating `LEGACY/`.
@@ -57,9 +59,10 @@ flowchart LR
     S7 --> S8["Sprint 08<br/>Independent review"]
     S8 --> S9["Sprint 09<br/>Operations and pilot"]
     S9 --> S11["Sprint 11<br/>Release artifacts and installation"]
+    S11 --> S11A["Sprint 11A<br/>Release promotion and platform installation"]
     S11 --> S12["Sprint 12<br/>User runtime and config"]
     S12 --> S13["Sprint 13<br/>Auth and diagnostics"]
-    S13 --> S14["Sprint 14<br/>Durable project routing"]
+    S13 --> S14["Sprint 14<br/>Project routing and worktrees"]
     S14 --> S15["Sprint 15<br/>Guided onboarding"]
 ```
 
@@ -76,9 +79,10 @@ flowchart LR
 | [08 — Independent review](08-independent-review.md) | Different-harness maker/checker loop | Linear + GitHub |
 | [09 — Operations and pilot](09-operations-and-pilot.md) | Deployable, observable, recoverable pilot | Pilot repositories |
 | [11 — Release artifacts, versioning, and installation](11-release-artifacts-versioning-and-installation.md) | Reproducible binary artifacts and documented installation | This repository only |
+| [11A — Release promotion and multi-platform installation](11a-release-promotion-and-multi-platform-installation.md) | Staged release promotion and host-selected, checksum-verified installation | This repository only |
 | [12 — User runtime and configuration](12-user-runtime-and-configuration.md) | Login-user service, XDG paths, and maker/reviewer execution configuration | No |
 | [13 — Authentication and diagnostics](13-authentication-and-diagnostics.md) | Managed service auth and provider-native harness/Git/SSH diagnosis | Authentication only |
-| [14 — Durable project routing](14-durable-project-routing.md) | SQLite-backed Linear-project-to-repository routing and allowlisting | No |
+| [14 — Durable project routing and worktree sources](14-durable-project-routing.md) | SQLite-backed project routing and Git-aware worktree ownership | No |
 | [15 — Guided onboarding and project provisioning](15-guided-onboarding-and-project-provisioning.md) | Resumable `spire init`/`spire new` and controlled Linear project creation | Linear setup only |
 
 ## Shared Definition of Done
@@ -108,11 +112,14 @@ Every sprint must satisfy all applicable items:
 | `LinearPort` | Sprint 01 | Sprint 03 | Core owns interface |
 | Dispatch decision schema | Sprint 02 | Sprint 04 | Immutable audit record |
 | `HarnessRunnerPort` | Sprint 01 | Sprint 05 | Provider-neutral result |
+| Worktree allocation contract | Sprint 14 | Sprint 15 and controlled pilot runtime | One maker worktree per root attempt; detached reviewer worktree per reviewed SHA |
 | Webhook inbox/outbox | Sprint 02 | Sprints 06–08 | At-least-once and idempotent |
 | GitHub canonical facts | Sprint 07 | Sprint 08 | Bind all gates to head SHA |
 | Deployment and recovery runbook | Sprint 09 | Operators | Drill after material changes |
 | Versioned binary archive and checksum manifest | Sprint 11 | Operators and installers | Exact tag, target, and checksum identify the bytes |
 | Root README installation contract | Sprint 11 | Operators and contributors | Commands name a release asset, never a transient Actions run |
+| Promoted multi-platform release set | Sprint 11A | Operators and installers | Validated tag-run bytes are published once; public smoke tests pass before latest promotion |
+| Installer platform mapping | Sprint 11A | Shell installer | Every supported OS/architecture pair maps to exactly one natively tested release target |
 | Installation profile and path resolver | Sprint 12 | Every CLI command | One precedence implementation; user/system profiles never mix implicitly |
 | Maker/reviewer role configuration | Sprint 12 | Dispatch compilation | Provider, model, and effort compile into a versioned complete policy |
 | Secret store and diagnostic contracts | Sprint 13 | Init and operations | No raw secret or provider auth object crosses into core DTOs |
@@ -131,6 +138,8 @@ Every sprint must satisfy all applicable items:
   suggested slices in its document.
 - Sprint 10 is intentionally unallocated in the current roadmap. Sprint 11 is a
   follow-on release-engineering sprint and must not be renumbered to fill that gap.
+- Sprint 11A is an urgent hardening gate for the next public release. It follows
+  Sprint 11 directly and may proceed independently of product Sprints 12–15.
 - Sprints 12–15 implement the accepted onboarding direction; preserve their
   work-package IDs when refining scope.
 
@@ -139,6 +148,7 @@ Every sprint must satisfy all applicable items:
 - [`../ai_harness_architecture.md`](../ai_harness_architecture.md)
 - [`../ai_harness_implementation.md`](../ai_harness_implementation.md)
 - [`../decisions/first-run-onboarding-and-project-mapping.md`](../decisions/first-run-onboarding-and-project-mapping.md)
+- [`../decisions/worktree-first-workspace-ownership.md`](../decisions/worktree-first-workspace-ownership.md)
 - User decisions recorded in those documents on 2026-07-28 and 2026-07-29.
 - Application source, migrations, deployment units, and operator runbooks were
   inspected when Sprints 12–15 were added.
