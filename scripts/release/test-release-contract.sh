@@ -4,6 +4,7 @@ set -euo pipefail
 readonly repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly verifier="${repository_root}/scripts/release/verify-release.sh"
 readonly installer="${repository_root}/install.sh"
+readonly build_workflow="${repository_root}/.github/workflows/build.yml"
 readonly version="$(awk '
   /^\[workspace\.package\]$/ { in_workspace_package = 1; next }
   /^\[/ { in_workspace_package = 0 }
@@ -19,6 +20,11 @@ readonly tag="v${version}"
 readonly target="release-contract-test"
 readonly scratch="$(mktemp -d)"
 trap 'rm -rf "${scratch}"' EXIT
+
+if grep -Fq './scripts/release/preflight-release.sh' "${build_workflow}"; then
+  printf 'normal build CI must not reject an already-published release tag\n' >&2
+  exit 1
+fi
 
 make_archive() {
   local name="$1"
