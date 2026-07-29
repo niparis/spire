@@ -5,7 +5,9 @@
 pub mod config;
 pub mod linear;
 pub mod ports;
+pub mod scheduler;
 
 pub use config::*;
 pub use linear::*;
 pub use ports::*;
+pub use scheduler::*;
