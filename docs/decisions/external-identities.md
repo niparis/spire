@@ -1,6 +1,6 @@
 # External identities and authority map
 
-**Status:** blocked on operator-supplied read-only evidence
+**Status:** runtime identity contract accepted; provider/VM evidence remains operator-supplied
 **Decision owner:** platform operator
 **Last checked:** 2026-07-29
 
@@ -17,7 +17,14 @@ The committed example configuration contains names and credential references onl
 | Cloudflare | account/zone owner and webhook hostname | operator-owned DNS/Access record | unverified |
 | VM | distribution and systemd version | `cat /etc/os-release`; `systemctl --version` | unverified |
 
-## Secret references
+## Runtime identities and secret references
+
+Spire runs under the invoking login user by default. Codex and Claude Code use
+that user's provider-native authentication; their configuration contains a
+provider, model, and effort but no Spire-managed harness credential reference.
+A dedicated system identity is an explicit advanced installation profile.
+
+## Managed secret references
 
 Only the following reference forms are permitted in configuration and decision
 records. Values must be injected by the deployment environment, never committed.
@@ -26,8 +33,6 @@ records. Values must be injected by the deployment environment, never committed.
 |---|---|---|
 | Linear read/write adapter | `systemd:credentials/linear-api-token` | Linear adapter only |
 | GitHub App signing key | `systemd:credentials/github-app-private-key` | publisher only |
-| Codex authentication | `systemd:credentials/codex-auth` | Codex runner only |
-| Claude authentication | `systemd:credentials/claude-auth` | Claude runner only |
 | Webhook verification | `systemd:credentials/linear-webhook-secret` | ingress only |
 
 ## Completion procedure
@@ -39,6 +44,9 @@ records. Values must be injected by the deployment environment, never committed.
 3. Populate the corresponding non-secret values in an operator-owned config file.
 4. Attach redacted responses to the change record and update this table to
    `verified` with the observation date.
+
+Provider-native harness authentication and user-systemd persistence need target
+VM evidence in Sprints 12 and 13; neither is inferred from an interactive shell.
 
 No production Linear, GitHub, or Cloudflare mutation is authorized by this
 document.

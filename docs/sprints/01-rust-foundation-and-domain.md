@@ -162,7 +162,8 @@ Implementation:
 
 1. Define one typed root configuration.
 2. Support a committed redacted example and an operator-owned real file.
-3. Resolve secrets from environment/systemd credential references.
+3. Resolve managed-provider secrets from environment/systemd credential
+   references; Codex and Claude Code use provider-native runtime-user auth.
 4. Validate complexity mapping, harness registry, dispatch policy, concurrency,
    paths, status IDs, and timeouts as one operation.
 5. Reject unknown fields to catch spelling mistakes.
@@ -235,4 +236,3 @@ configuration, and exercise domain transitions entirely in memory.
 
 - Exact crate versions remain unverified until Sprint 00 pins them.
 - Target paths are proposed because the Rust workspace does not yet exist.
-

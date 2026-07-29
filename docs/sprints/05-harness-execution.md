@@ -66,8 +66,9 @@ Verification:
 Implementation:
 
 1. Create unit name `spire-run-<run-id>.service`.
-2. Set working directory, environment allowlist, credentials, timeout, and resource
-   controls.
+2. Set working directory, environment allowlist, provider-native runtime-user
+   authentication context, timeout, and resource controls. Managed credentials
+   remain limited to non-harness integrations.
 3. Capture stdout/stderr or provider JSONL in a per-run evidence path.
 4. Implement start, inspect, cancel, and collect operations.
 5. On cancellation, send graceful stop then force kill after configured grace.
@@ -236,4 +237,3 @@ continuation after a terminal context/capacity event.
 
 - Exact real quota signals remain limited to captured fixtures.
 - Harness token usage fields may differ by authentication mode.
-

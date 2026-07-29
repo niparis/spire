@@ -1671,35 +1671,8 @@ cloudflare:
   origin: http://127.0.0.1:8080
 
 harnesses:
-  codex:
-    credential_profile: default
-    models:
-      "<model-id>":
-        efforts: [medium, high]
-  claude-code:
-    credential_profile: default
-    models:
-      "<model-id>":
-        efforts: [medium, high]
-
-dispatch:
-  policy_version: 1
-  rules:
-    - id: implementation-small
-      when: { role: implementation, complexity: [small] }
-      candidates:
-        - { harness: codex, model: "<model-id>", effort: medium }
-        - { harness: claude-code, model: "<model-id>", effort: medium }
-    - id: implementation-large
-      when: { role: implementation, complexity: [medium, large, xlarge] }
-      candidates:
-        - { harness: codex, model: "<model-id>", effort: high }
-        - { harness: claude-code, model: "<model-id>", effort: high }
-    - id: review-default
-      when: { role: review, complexity: [small, medium, large, xlarge] }
-      candidates:
-        - { harness: claude-code, model: "<model-id>", effort: high }
-        - { harness: codex, model: "<model-id>", effort: high }
+  maker: { provider: codex, model: "<model-id>", effort: high }
+  reviewer: { provider: claude-code, model: "<model-id>", effort: high }
 
 concurrency:
   total_active_harness_runs: 3
@@ -1730,9 +1703,19 @@ retention:
 Status IDs, not human-readable names, should be resolved and validated at startup.
 Fail readiness if configured IDs do not belong to the configured Linear team.
 
-The `harnesses` section is the capability and credential registry. The `dispatch`
-section owns selection policy. Neither belongs in Linear. Both are validated
-together before the service becomes ready.
+The default `harnesses` section records the complete maker and reviewer triplets.
+It compiles into deterministic all-complexity dispatch coverage with a generated
+policy version. The providers must differ. Optional advanced dispatch rules may
+add complexity-specific selection and ordered fallback candidates; neither form
+belongs in Linear. Codex and Claude Code authenticate natively as the configured
+runtime user, not through a Spire harness credential reference.
+
+Schema 4 resolves user configuration in this order: `--config`, `SPIRE_CONFIG`,
+user XDG configuration, then `/etc/spire/spire.yaml`. The default profile uses
+`$XDG_CONFIG_HOME/spire`, `$XDG_DATA_HOME/spire`, `$XDG_STATE_HOME/spire`, and
+`$XDG_CACHE_HOME/spire` (with XDG fallbacks); `--system` is explicit and remains
+compatible with `/etc/spire` and `/var/lib/spire`. Existing runs retain their
+persisted dispatch decision when configuration changes.
 
 ### Delivery plan
 

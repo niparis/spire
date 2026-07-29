@@ -156,7 +156,9 @@ Create `README.md` as a concise operator-facing entry point. It must contain:
    runbooks.
 3. Prerequisites and supported-platform statement: Sprint 11 establishes Linux
    x86_64 (`x86_64-unknown-linux-musl`); Sprint 11A adds native macOS target
-   validation. Configuration and provider credentials remain operator-owned.
+   validation. Configuration and provider credentials remain operator-owned. Sprint
+   12 adds user-XDG configuration and provider-native login-user harness auth;
+   the release archive itself remains free of both.
 4. Source verification commands and the canonical CI gates.
 5. A shell-installer command following the standard one-line pattern:
    `curl -LsSf https://github.com/niparis/spire/releases/latest/download/install.sh | sh`.

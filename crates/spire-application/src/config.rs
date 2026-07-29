@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, fs, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    net::SocketAddr,
+    path::PathBuf,
+};
 
 use crate::{LinearStateKind, RepositoryMapping, RolloutGate, WebhookLimits};
 use serde::Deserialize;
@@ -16,8 +21,9 @@ pub struct Config {
     pub linear: LinearConfig,
     pub github: GitHubConfig,
     pub cloudflare: CloudflareConfig,
-    pub harnesses: BTreeMap<HarnessId, HarnessConfig>,
-    pub dispatch: DispatchConfig,
+    pub harnesses: HarnessRolesConfig,
+    #[serde(default)]
+    pub dispatch: Option<DispatchConfig>,
     pub concurrency: ConcurrencyConfig,
     pub security: SecurityConfig,
     pub runtime: RuntimeConfig,
@@ -85,9 +91,24 @@ pub struct CloudflareConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HarnessConfig {
-    pub executable: String,
-    pub credential_ref: String,
+pub struct HarnessRolesConfig {
+    pub maker: HarnessRoleConfig,
+    pub reviewer: HarnessRoleConfig,
+    #[serde(default)]
+    pub advanced: BTreeMap<HarnessId, AdvancedHarnessConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessRoleConfig {
+    pub provider: HarnessId,
+    pub model: ModelId,
+    pub effort: Effort,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvancedHarnessConfig {
     pub models: Vec<ModelId>,
     pub efforts: Vec<Effort>,
 }
@@ -205,7 +226,9 @@ pub enum ConfigError {
     },
     #[error("invalid configuration YAML: {0}")]
     Parse(#[from] serde_yaml::Error),
-    #[error("configuration schema_version must be {SCHEMA_VERSION}")]
+    #[error(
+        "configuration schema_version must be {SCHEMA_VERSION}; run `spire config migrate --from PATH` for schema 3"
+    )]
     UnsupportedSchemaVersion,
     #[error("configuration value {path} is missing or is still a placeholder")]
     MissingValue { path: String },
@@ -229,6 +252,8 @@ pub enum ConfigError {
     ReviewerCanPush,
     #[error("credentials must not be able to merge")]
     CredentialCanMerge,
+    #[error("harnesses.maker.provider and harnesses.reviewer.provider must differ")]
+    SameMakerReviewerProvider,
     #[error(transparent)]
     Dispatch(#[from] DispatchPolicyError),
     #[error("invalid domain value at {path}: {message}")]
@@ -238,7 +263,7 @@ pub enum ConfigError {
 /// The only configuration schema this build accepts. Sprint 06 added the signed
 /// ingress and restricted-rollout sections, so a Sprint 05 file must be edited
 /// rather than silently reinterpreted.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 const MAX_WEBHOOK_BODY_BYTES: usize = 1_048_576;
 const MAX_REPLAY_WINDOW_SECONDS: u64 = 600;
 
@@ -496,54 +521,8 @@ impl Config {
             return Err(ConfigError::AdminMustBeLoopback);
         }
 
-        let mut capabilities = HarnessCapabilityRegistry::default();
-        for (harness, config) in &self.harnesses {
-            ensure_value(
-                &format!("harnesses.{harness}.executable"),
-                &config.executable,
-            )?;
-            ensure_credential_reference(
-                &format!("harnesses.{harness}.credential_ref"),
-                &config.credential_ref,
-            )?;
-            if config.models.is_empty() || config.efforts.is_empty() {
-                return Err(ConfigError::MissingValue {
-                    path: format!("harnesses.{harness}.models/efforts"),
-                });
-            }
-            capabilities.register(
-                harness.clone(),
-                config.models.clone(),
-                config.efforts.clone(),
-            );
-        }
-
-        let policy_version =
-            DispatchPolicyVersion::new(self.dispatch.policy_version).map_err(|error| {
-                ConfigError::Domain {
-                    path: "dispatch.policy_version".to_owned(),
-                    message: error.to_string(),
-                }
-            })?;
-        let policy = DispatchPolicy {
-            policy_version,
-            rules: self
-                .dispatch
-                .rules
-                .iter()
-                .map(|rule| {
-                    Ok(DispatchRule {
-                        id: DispatchRuleId::new(&rule.id).map_err(|error| ConfigError::Domain {
-                            path: format!("dispatch.rules.{}.id", rule.id),
-                            message: error.to_string(),
-                        })?,
-                        role: rule.when.role,
-                        complexity: rule.when.complexity.clone(),
-                        candidates: rule.candidates.clone(),
-                    })
-                })
-                .collect::<Result<Vec<_>, ConfigError>>()?,
-        };
+        let (capabilities, policy) =
+            compile_harness_configuration(&self.harnesses, self.dispatch.as_ref())?;
         policy.validate(&capabilities)?;
 
         Ok(ValidatedConfig {
@@ -552,6 +531,106 @@ impl Config {
             capabilities,
         })
     }
+}
+
+fn compile_harness_configuration(
+    harnesses: &HarnessRolesConfig,
+    dispatch: Option<&DispatchConfig>,
+) -> Result<(HarnessCapabilityRegistry, DispatchPolicy), ConfigError> {
+    if harnesses.maker.provider == harnesses.reviewer.provider {
+        return Err(ConfigError::SameMakerReviewerProvider);
+    }
+
+    let mut configured = BTreeMap::<HarnessId, (BTreeSet<ModelId>, BTreeSet<Effort>)>::new();
+    for role in [&harnesses.maker, &harnesses.reviewer] {
+        let entry = configured.entry(role.provider.clone()).or_default();
+        entry.0.insert(role.model.clone());
+        entry.1.insert(role.effort);
+    }
+    for (provider, advanced) in &harnesses.advanced {
+        if advanced.models.is_empty() || advanced.efforts.is_empty() {
+            return Err(ConfigError::MissingValue {
+                path: format!("harnesses.advanced.{provider}.models/efforts"),
+            });
+        }
+        let entry = configured.entry(provider.clone()).or_default();
+        entry.0.extend(advanced.models.iter().cloned());
+        entry.1.extend(advanced.efforts.iter().copied());
+    }
+    let mut capabilities = HarnessCapabilityRegistry::default();
+    for (provider, (models, efforts)) in configured {
+        capabilities.register(provider, models, efforts);
+    }
+
+    let policy = match dispatch {
+        Some(dispatch) => explicit_dispatch_policy(dispatch)?,
+        None => generated_role_policy(harnesses)?,
+    };
+    Ok((capabilities, policy))
+}
+
+fn explicit_dispatch_policy(dispatch: &DispatchConfig) -> Result<DispatchPolicy, ConfigError> {
+    let policy_version = DispatchPolicyVersion::new(dispatch.policy_version).map_err(|error| {
+        ConfigError::Domain {
+            path: "dispatch.policy_version".to_owned(),
+            message: error.to_string(),
+        }
+    })?;
+    Ok(DispatchPolicy {
+        policy_version,
+        rules: dispatch
+            .rules
+            .iter()
+            .map(|rule| {
+                Ok(DispatchRule {
+                    id: DispatchRuleId::new(&rule.id).map_err(|error| ConfigError::Domain {
+                        path: format!("dispatch.rules.{}.id", rule.id),
+                        message: error.to_string(),
+                    })?,
+                    role: rule.when.role,
+                    complexity: rule.when.complexity.clone(),
+                    candidates: rule.candidates.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, ConfigError>>()?,
+    })
+}
+
+fn generated_role_policy(harnesses: &HarnessRolesConfig) -> Result<DispatchPolicy, ConfigError> {
+    let candidate = |role: &HarnessRoleConfig| DispatchCandidate {
+        harness: role.provider.clone(),
+        model: role.model.clone(),
+        effort: role.effort,
+    };
+    Ok(DispatchPolicy {
+        // Schema 4's generated policy is stable and distinct from manually
+        // authored policy versions. Active runs persist the resulting version.
+        policy_version: DispatchPolicyVersion::new(4).expect("non-zero constant"),
+        rules: vec![
+            DispatchRule {
+                id: DispatchRuleId::new("generated-implementation-all").map_err(|error| {
+                    ConfigError::Domain {
+                        path: "harnesses.maker".to_owned(),
+                        message: error.to_string(),
+                    }
+                })?,
+                role: RunRole::Implementation,
+                complexity: ComplexityClass::ALL.to_vec(),
+                candidates: vec![candidate(&harnesses.maker)],
+            },
+            DispatchRule {
+                id: DispatchRuleId::new("generated-review-all").map_err(|error| {
+                    ConfigError::Domain {
+                        path: "harnesses.reviewer".to_owned(),
+                        message: error.to_string(),
+                    }
+                })?,
+                role: RunRole::Review,
+                complexity: ComplexityClass::ALL.to_vec(),
+                candidates: vec![candidate(&harnesses.reviewer)],
+            },
+        ],
+    })
 }
 
 fn ensure_value(path: &str, value: &str) -> Result<(), ConfigError> {
@@ -760,7 +839,7 @@ mod tests {
     use super::*;
 
     const VALID_CONFIG: &str = r#"
-schema_version: 3
+schema_version: 4
 linear:
   organization_id: org
   team_id: team
@@ -785,21 +864,8 @@ github:
     - {repository: owner/repository, base_branch: main, required_checks: [test], workspace_root: /var/lib/spire/workspaces/owner-repository}
 cloudflare: {account_ref: account, zone_ref: zone, webhook_hostname: spire.example.test}
 harnesses:
-  codex: {executable: codex, credential_ref: env:CODEX_TOKEN, models: [codex-model], efforts: [medium]}
-  claude-code: {executable: claude, credential_ref: env:CLAUDE_TOKEN, models: [claude-model], efforts: [medium]}
-dispatch:
-  policy_version: 1
-  rules:
-    - id: implementation
-      when: {role: implementation, complexity: [small, medium, large, xlarge]}
-      candidates:
-        - {harness: codex, model: codex-model, effort: medium}
-        - {harness: claude-code, model: claude-model, effort: medium}
-    - id: review
-      when: {role: review, complexity: [small, medium, large, xlarge]}
-      candidates:
-        - {harness: claude-code, model: claude-model, effort: medium}
-        - {harness: codex, model: codex-model, effort: medium}
+  maker: {provider: codex, model: codex-model, effort: medium}
+  reviewer: {provider: claude-code, model: claude-model, effort: medium}
 concurrency: {total_active_harness_runs: 3, ai_initiated_active_harness_runs: 1, mutating_runs_per_repository: 1, active_runs_per_ticket: 1, cleanup_global: 1}
 security: {admin_access: loopback, maker_push_mode: mechanical_publisher, reviewer_can_push: false, credential_can_merge: false}
 runtime: {database_path: /var/lib/spire/data/spire.db, database_max_connections: 4, data_root: /var/lib/spire/data, backup_root: /var/lib/spire/backups, workspace_root: /var/lib/spire/workspaces, evidence_root: /var/lib/spire/evidence, implementation_timeout_seconds: 7200, review_timeout_seconds: 1800}
@@ -820,6 +886,8 @@ rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositori
     fn validates_complete_provider_neutral_config() {
         let config = Config::from_yaml(VALID_CONFIG).unwrap().validate().unwrap();
         assert_eq!(config.webhook_limits().replay_window_seconds, 60);
+        assert_eq!(config.policy.policy_version.value(), 4);
+        assert_eq!(config.policy.rules.len(), 2);
         assert!(!config.rollout_gate(false).linear_writes_enabled);
         assert_eq!(
             config.config.linear.state_id(LinearStateKind::InProgress),
@@ -832,14 +900,36 @@ rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositori
     }
 
     #[test]
-    fn rejects_unknown_keys_and_empty_policy() {
-        assert!(Config::from_yaml("schema_version: 3\nunknown: value").is_err());
-        let invalid = VALID_CONFIG.replace("policy_version: 1", "policy_version: 0");
+    fn rejects_same_provider_for_maker_and_reviewer() {
+        let invalid = VALID_CONFIG.replace(
+            "reviewer: {provider: claude-code",
+            "reviewer: {provider: codex",
+        );
         assert!(matches!(
             Config::from_yaml(&invalid).unwrap().validate(),
-            Err(ConfigError::Domain { .. })
+            Err(ConfigError::SameMakerReviewerProvider)
         ));
-        let invalid = VALID_CONFIG.replace("schema_version: 3", "schema_version: 2");
+    }
+
+    #[test]
+    fn explicit_advanced_policy_is_validated_against_role_capabilities() {
+        let advanced = VALID_CONFIG.replace(
+            "  reviewer: {provider: claude-code, model: claude-model, effort: medium}",
+            "  reviewer: {provider: claude-code, model: claude-model, effort: medium}\n  advanced:\n    codex: {models: [codex-model, codex-backup], efforts: [medium]}\ndispatch:\n  policy_version: 7\n  rules:\n    - {id: maker-all, when: {role: implementation, complexity: [small, medium, large, xlarge]}, candidates: [{harness: codex, model: codex-model, effort: medium}, {harness: codex, model: codex-backup, effort: medium}]}\n    - {id: review-all, when: {role: review, complexity: [small, medium, large, xlarge]}, candidates: [{harness: claude-code, model: claude-model, effort: medium}]}",
+        );
+        let config = Config::from_yaml(&advanced).unwrap().validate().unwrap();
+        assert_eq!(config.policy.policy_version.value(), 7);
+    }
+
+    #[test]
+    fn rejects_unknown_keys_and_empty_policy() {
+        assert!(Config::from_yaml("schema_version: 3\nunknown: value").is_err());
+        let invalid = VALID_CONFIG.replace("schema_version: 4", "schema_version: 3");
+        assert!(matches!(
+            Config::from_yaml(&invalid).unwrap().validate(),
+            Err(ConfigError::UnsupportedSchemaVersion)
+        ));
+        let invalid = VALID_CONFIG.replace("schema_version: 4", "schema_version: 2");
         assert!(matches!(
             Config::from_yaml(&invalid).unwrap().validate(),
             Err(ConfigError::UnsupportedSchemaVersion)

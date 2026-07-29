@@ -26,8 +26,10 @@ Implementation:
 1. Create dedicated service user and groups.
 2. Define filesystem ownership for binary, config, SQLite, backups, evidence, and
    workspaces.
-3. Install `spire-orchestrator.service` with restart policy and graceful timeout.
-4. Load secrets through approved systemd credential/environment mechanism.
+3. Install the explicit hardened system-profile service with restart policy and
+   graceful timeout; Sprint 12 supplies a separate user-level service.
+4. Load managed integration secrets through approved systemd credential/environment
+   mechanism, not Codex or Claude Code provider-native authentication.
 5. Apply service hardening compatible with Git/worktree/harness execution.
 6. Order local service and `cloudflared` without making scheduler correctness depend
    on tunnel availability.
@@ -273,4 +275,3 @@ human-ready, and require a human to merge.
   approval.
 - Long-term need for a second host or PostgreSQL is deliberately unevaluated until
   SQLite shows real limits.
-
