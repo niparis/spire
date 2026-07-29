@@ -23,17 +23,17 @@ capacity failures, and recover after restart. Starts remain manual/admin-trigger
 Implementation:
 
 1. Derive branch and directory names from validated identifiers.
-2. Resolve and verify all paths under the configured repository workspace root.
-3. Create a per-run ownership marker containing WorkItem and Run IDs.
-4. Create/update the base clone and allocate an isolated worktree.
+2. Resolve and verify all paths under configured repository workspace root.
+3. Create per-run ownership marker containing Run and WorkItem IDs.
+4. Create/update base clone and allocate isolated worktree.
 5. Reject dirty/unowned paths.
-6. Record base SHA, branch, path, and lifecycle state in SQLite.
+6. Record base SHA, branch, path, and lifecycle state.
 
 Verification:
 
 - Path traversal and symlink-escape tests fail closed.
 - Concurrent allocation cannot reuse a branch/path.
-- Cleanup cannot target the repository cache or database.
+- Cleanup cannot target repository cache or database.
 
 ### S05.2 Define provider-neutral run input/output schemas
 

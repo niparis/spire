@@ -95,7 +95,7 @@ Implementation:
 1. Use read-only worktree/repository permissions where practical.
 2. Disallow push, PR mutation, and merge credentials.
 3. Limit tools/commands to inspection and tests that do not mutate tracked files.
-4. Detect worktree changes after review and fail the review contract.
+4. Detect changes after review and fail the review contract.
 
 Verification:
 
@@ -240,4 +240,3 @@ human-ready draft PR.
 - Exact GitHub representation of the AI judgment gate remains an implementation
   choice: check run, review, or both.
 - Review waiver UX and authorized actor list require operator approval.
-
