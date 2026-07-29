@@ -12,6 +12,11 @@
 - All external mutations originate from an idempotent outbox action.
 - A review waiver requires an explicit human authority, reason, timestamp, and
   immutable audit record.
+- Default user services do not inject Codex or Claude Code credentials. They may
+  read the login user's native provider and SSH configuration without granting
+  merge authority.
+- Machine-wide writes require explicit `--system` selection and the required
+  privilege; a user installation must never silently fall back to `/etc/spire`.
 
 ## Decisions requiring an operator selection
 

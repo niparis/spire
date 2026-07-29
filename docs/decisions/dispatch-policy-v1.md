@@ -12,14 +12,14 @@ explicit—there are no defaults.
 
 | Role | Complexity | Ordered candidates | Verification state |
 |---|---|---|---|
-| implementation | small | operator must supply two or more candidates | blocked |
-| implementation | medium | operator must supply two or more candidates | blocked |
-| implementation | large | operator must supply two or more candidates | blocked |
-| implementation | xlarge | operator must supply two or more candidates | blocked |
-| review | small | must include a harness distinct from every maker candidate | blocked |
-| review | medium | must include a harness distinct from every maker candidate | blocked |
-| review | large | must include a harness distinct from every maker candidate | blocked |
-| review | xlarge | must include a harness distinct from every maker candidate | blocked |
+| implementation | small | one primary candidate; fallbacks are optional advanced configuration | defined |
+| implementation | medium | one primary candidate; fallbacks are optional advanced configuration | defined |
+| implementation | large | one primary candidate; fallbacks are optional advanced configuration | defined |
+| implementation | xlarge | one primary candidate; fallbacks are optional advanced configuration | defined |
+| review | small | one primary candidate on a different provider from maker | defined |
+| review | medium | one primary candidate on a different provider from maker | defined |
+| review | large | one primary candidate on a different provider from maker | defined |
+| review | xlarge | one primary candidate on a different provider from maker | defined |
 
 ## Binding decisions
 
@@ -32,6 +32,9 @@ explicit—there are no defaults.
   sticky maker, even if the model differs.
 - A capacity refusal before a run is accepted releases the provisional slot;
   capacity exhaustion after a terminal run preserves the maker and worktree.
+- Schema 4 role configuration generates one deterministic all-complexity rule
+  per role. Advanced configuration may replace this with exact rules and ordered
+  fallback candidates, subject to the same coverage and separation validation.
 
 ## Acceptance checklist for the concrete policy
 
