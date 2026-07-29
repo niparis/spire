@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use spire_application::{CapacityCounts, CapacityLimits, SchedulerInitiator, capacity_allows};
+use spire_application::{
+    CanonicalPullRequest, CapacityCounts, CapacityLimits, CheckRun, PullRequestState,
+    RequiredCheckGate, SchedulerInitiator, capacity_allows,
+};
 use sqlx::{
     Row, Sqlite, SqlitePool,
     pool::PoolConnection,
@@ -149,6 +152,28 @@ pub enum RootClaimResult {
     RevisionChanged,
     AlreadyOwned,
     CapacityBlocked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullRequestPersistence {
+    Updated,
+    IgnoredRepositoryOrBranch,
+    StaleWorkItem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiGatePersistence {
+    Applied,
+    StaleHead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiCorrectionPersistence {
+    Scheduled { cycle: u8 },
+    CapacityBlocked,
+    Exhausted,
+    NoStickyMaker,
+    StaleWorkItem,
 }
 
 impl SqliteDatabase {
@@ -447,6 +472,190 @@ impl SqliteDatabase {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Persists only canonical GitHub data. A harness-reported URL or SHA is
+    /// never accepted here without this adapter-facing canonical fact.
+    pub async fn persist_canonical_pull_request(
+        &self,
+        work_item_id: &str,
+        expected_repository: &str,
+        expected_branch: &str,
+        pull_request: &CanonicalPullRequest,
+        now: i64,
+    ) -> Result<PullRequestPersistence, SqliteAdapterError> {
+        if pull_request.repository.as_str() != expected_repository
+            || pull_request.head_branch != expected_branch
+        {
+            return Ok(PullRequestPersistence::IgnoredRepositoryOrBranch);
+        }
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let result = async {
+            let current = sqlx::query("SELECT repository, current_head_sha FROM work_items WHERE id = ?")
+                .bind(work_item_id).fetch_optional(&mut *connection).await?;
+            let Some(current) = current else { return Ok::<_, sqlx::Error>(PullRequestPersistence::StaleWorkItem) };
+            if current.get::<Option<String>, _>("repository").as_deref() != Some(expected_repository) {
+                return Ok(PullRequestPersistence::IgnoredRepositoryOrBranch);
+            }
+            let head_changed = current.get::<Option<String>, _>("current_head_sha").as_deref() != Some(pull_request.head_sha.as_str());
+            sqlx::query("UPDATE work_items SET pull_request_number = ?, pull_request_url = ?, pull_request_branch = ?, base_branch = ?, base_sha = ?, current_head_sha = ?, state = 'waiting_for_ci', github_conflict_reason = NULL, updated_at = ? WHERE id = ?")
+                .bind(pull_request.number as i64).bind(&pull_request.url).bind(&pull_request.head_branch).bind(&pull_request.base_branch).bind(pull_request.base_sha.as_str()).bind(pull_request.head_sha.as_str()).bind(now).bind(work_item_id).execute(&mut *connection).await?;
+            if head_changed {
+                sqlx::query("UPDATE review_cycles SET ci_state = 'invalidated', review_state = 'invalidated', updated_at = ? WHERE work_item_id = ? AND head_sha != ?")
+                    .bind(now).bind(work_item_id).bind(pull_request.head_sha.as_str()).execute(&mut *connection).await?;
+                // A stale checker may finish, but it cannot advance an invalidated cycle.
+                sqlx::query("UPDATE runs SET status = 'cancel_requested', updated_at = ? WHERE work_item_id = ? AND role = 'review' AND status IN ('queued', 'starting', 'running')")
+                    .bind(now).bind(work_item_id).execute(&mut *connection).await?;
+            }
+            Ok(PullRequestPersistence::Updated)
+        }.await;
+        match result {
+            Ok(value) => {
+                sqlx::query("COMMIT").execute(&mut *connection).await?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Commits CI evidence only if the SHA is still the work item's current
+    /// head. The caller must fetch the PR head immediately before this command.
+    pub async fn persist_required_check_gate(
+        &self,
+        work_item_id: &str,
+        head_sha: &str,
+        gate: &RequiredCheckGate,
+        now: i64,
+    ) -> Result<CiGatePersistence, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let result = async {
+            let current = sqlx::query_scalar::<_, Option<String>>("SELECT current_head_sha FROM work_items WHERE id = ?").bind(work_item_id).fetch_optional(&mut *connection).await?.flatten();
+            if current.as_deref() != Some(head_sha) { return Ok::<_, sqlx::Error>(CiGatePersistence::StaleHead); }
+            let checks: &[CheckRun] = match gate { RequiredCheckGate::Failed { failures } => failures, RequiredCheckGate::Succeeded { evidence } => evidence, _ => &[] };
+            for check in checks {
+                sqlx::query("INSERT INTO github_check_evidence (id, work_item_id, head_sha, check_name, status, details_url, completed_at, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(work_item_id, head_sha, check_name, status, details_url) DO UPDATE SET observed_at = excluded.observed_at")
+                    .bind(Uuid::new_v4().to_string()).bind(work_item_id).bind(head_sha).bind(&check.name).bind(match check.status { spire_application::CheckStatus::Pending => "pending", spire_application::CheckStatus::Succeeded => "succeeded", spire_application::CheckStatus::Failed => "failed", spire_application::CheckStatus::Cancelled => "cancelled", spire_application::CheckStatus::Skipped => "skipped" }).bind(&check.details_url).bind(check.completed_at_unix_seconds).bind(now).execute(&mut *connection).await?;
+            }
+            let state = match gate { RequiredCheckGate::Succeeded { .. } => "waiting_for_review", _ => "waiting_for_ci" };
+            sqlx::query("UPDATE work_items SET state = ?, updated_at = ? WHERE id = ? AND current_head_sha = ?")
+                .bind(state).bind(now).bind(work_item_id).bind(head_sha).execute(&mut *connection).await?;
+            Ok(CiGatePersistence::Applied)
+        }.await;
+        match result {
+            Ok(value) => {
+                sqlx::query("COMMIT").execute(&mut *connection).await?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error.into())
+            }
+        }
+    }
+
+    pub async fn active_pull_request_work_items(
+        &self,
+    ) -> Result<Vec<(String, String, u64, String)>, SqliteAdapterError> {
+        let rows = sqlx::query("SELECT id, repository, pull_request_number, pull_request_branch FROM work_items WHERE state NOT IN ('blocked', 'completed', 'canceled') AND repository IS NOT NULL AND pull_request_number IS NOT NULL")
+            .fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get("id"),
+                    row.get("repository"),
+                    row.get::<i64, _>("pull_request_number") as u64,
+                    row.get::<Option<String>, _>("pull_request_branch")
+                        .unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+
+    /// Applies a canonical close or merge observation. A human action never
+    /// causes Spire to push, reopen, or otherwise overwrite repository state.
+    pub async fn persist_terminal_pull_request(
+        &self,
+        work_item_id: &str,
+        repository: &str,
+        branch: &str,
+        pull_request: &CanonicalPullRequest,
+        now: i64,
+    ) -> Result<PullRequestPersistence, SqliteAdapterError> {
+        if pull_request.repository.as_str() != repository || pull_request.head_branch != branch {
+            return Ok(PullRequestPersistence::IgnoredRepositoryOrBranch);
+        }
+        let state = match pull_request.state {
+            PullRequestState::Merged => "completed",
+            PullRequestState::Closed => "canceled",
+            PullRequestState::Open => return Ok(PullRequestPersistence::Updated),
+        };
+        let _write_gate = self.write_gate.lock().await;
+        let updated = sqlx::query("UPDATE work_items SET state = ?, active_run_id = NULL, updated_at = ? WHERE id = ? AND repository = ? AND pull_request_number = ?")
+            .bind(state).bind(now).bind(work_item_id).bind(repository).bind(pull_request.number as i64).execute(&self.pool).await?;
+        Ok(if updated.rows_affected() == 1 {
+            PullRequestPersistence::Updated
+        } else {
+            PullRequestPersistence::StaleWorkItem
+        })
+    }
+
+    /// Creates one AI-initiated correction using the already sticky maker
+    /// selection. It never re-evaluates provider candidates after code exists.
+    pub async fn schedule_ci_correction(
+        &self,
+        work_item_id: &str,
+        run_id: &str,
+        limits: CapacityLimits,
+        now: i64,
+    ) -> Result<CiCorrectionPersistence, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let mut connection = self.pool.acquire().await?;
+        begin_immediate(&mut connection).await?;
+        let result = async {
+            let item = sqlx::query("SELECT repository, ci_correction_cycles FROM work_items WHERE id = ? AND state = 'waiting_for_ci'")
+                .bind(work_item_id).fetch_optional(&mut *connection).await?;
+            let Some(item) = item else { return Ok::<_, sqlx::Error>(CiCorrectionPersistence::StaleWorkItem) };
+            let completed_cycles = item.get::<i64, _>("ci_correction_cycles") as u8;
+            if completed_cycles >= spire_application::MAX_INITIAL_CI_CORRECTION_CYCLES {
+                sqlx::query("UPDATE work_items SET state = 'blocked', updated_at = ? WHERE id = ?").bind(now).bind(work_item_id).execute(&mut *connection).await?;
+                return Ok(CiCorrectionPersistence::Exhausted);
+            }
+            let repository = item.get::<Option<String>, _>("repository").unwrap_or_default();
+            let counts = CapacityCounts {
+                total: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs WHERE status IN ('starting', 'running')").fetch_one(&mut *connection).await? as u16,
+                ai: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs WHERE status IN ('starting', 'running') AND initiator = 'ai'").fetch_one(&mut *connection).await? as u16,
+                repository: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs r JOIN work_items w ON w.id = r.work_item_id WHERE r.status IN ('starting', 'running') AND w.repository = ?").bind(&repository).fetch_one(&mut *connection).await? as u16,
+                ticket: sqlx::query_scalar::<_, i64>("SELECT count(*) FROM runs WHERE status IN ('starting', 'running') AND work_item_id = ?").bind(work_item_id).fetch_one(&mut *connection).await? as u16,
+            };
+            if capacity_allows(limits, counts, SchedulerInitiator::Ai).is_err() { return Ok(CiCorrectionPersistence::CapacityBlocked); }
+            let maker = sqlx::query("SELECT id, root_run_id, harness, model, effort FROM runs WHERE work_item_id = ? AND role = 'implementation' ORDER BY created_at ASC LIMIT 1")
+                .bind(work_item_id).fetch_optional(&mut *connection).await?;
+            let Some(maker) = maker else { return Ok(CiCorrectionPersistence::NoStickyMaker) };
+            let cycle = completed_cycles + 1;
+            sqlx::query("INSERT INTO runs (id, work_item_id, parent_run_id, root_run_id, role, harness, model, effort, status, initiator, trigger_kind, created_at, updated_at) VALUES (?, ?, ?, ?, 'implementation', ?, ?, ?, 'starting', 'ai', 'ci_failed', ?, ?)")
+                .bind(run_id).bind(work_item_id).bind(maker.get::<String, _>("id")).bind(maker.get::<String, _>("root_run_id")).bind(maker.get::<String, _>("harness")).bind(maker.get::<String, _>("model")).bind(maker.get::<String, _>("effort")).bind(now).bind(now).execute(&mut *connection).await?;
+            sqlx::query("UPDATE work_items SET active_run_id = ?, ci_correction_cycles = ?, updated_at = ? WHERE id = ?")
+                .bind(run_id).bind(i64::from(cycle)).bind(now).bind(work_item_id).execute(&mut *connection).await?;
+            Ok(CiCorrectionPersistence::Scheduled { cycle })
+        }.await;
+        match result {
+            Ok(value) => {
+                sqlx::query("COMMIT").execute(&mut *connection).await?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error.into())
+            }
+        }
     }
 
     /// Observations only replace unclaimed work with an equal-or-newer canonical revision.
@@ -1334,5 +1543,106 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn new_head_invalidates_old_ci_and_review_evidence() {
+        use spire_application::{CanonicalPullRequest, PullRequestState, RequiredCheckGate};
+        use spire_domain::{CommitSha, RepositoryName};
+
+        let database = database().await;
+        insert_work_item(&database, "work-1").await;
+        sqlx::query("UPDATE work_items SET repository = 'owner/repo', current_head_sha = 'old', state = 'waiting_for_review' WHERE id = 'work-1'")
+            .execute(database.pool()).await.unwrap();
+        sqlx::query("INSERT INTO review_cycles (id, work_item_id, head_sha, ci_state, review_state, created_at, updated_at) VALUES ('cycle-old', 'work-1', 'old', 'succeeded', 'approved', 0, 0)")
+            .execute(database.pool()).await.unwrap();
+        let pr = CanonicalPullRequest {
+            repository: RepositoryName::new("owner/repo").unwrap(),
+            number: 7,
+            url: "https://example.test/pr/7".into(),
+            state: PullRequestState::Open,
+            is_draft: true,
+            base_branch: "main".into(),
+            base_sha: CommitSha::new("base").unwrap(),
+            head_branch: "spire/SPI-1".into(),
+            head_sha: CommitSha::new("new").unwrap(),
+            mergeable: Some(true),
+            author: "maker".into(),
+            updated_at_unix_seconds: 1,
+        };
+        assert_eq!(
+            database
+                .persist_canonical_pull_request("work-1", "owner/repo", "spire/SPI-1", &pr, 2)
+                .await
+                .unwrap(),
+            PullRequestPersistence::Updated
+        );
+        let cycle: (String, String) = sqlx::query_as(
+            "SELECT ci_state, review_state FROM review_cycles WHERE id = 'cycle-old'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(cycle, ("invalidated".into(), "invalidated".into()));
+        assert_eq!(
+            database
+                .persist_required_check_gate(
+                    "work-1",
+                    "old",
+                    &RequiredCheckGate::Pending {
+                        missing: vec!["test".into()]
+                    },
+                    3
+                )
+                .await
+                .unwrap(),
+            CiGatePersistence::StaleHead
+        );
+    }
+
+    #[tokio::test]
+    async fn ci_correction_reuses_the_original_maker_and_is_bounded() {
+        let database = database().await;
+        insert_work_item(&database, "work-1").await;
+        sqlx::query("UPDATE work_items SET repository = 'owner/repo', state = 'waiting_for_ci' WHERE id = 'work-1'").execute(database.pool()).await.unwrap();
+        database
+            .create_run(
+                RunRecord {
+                    id: "maker",
+                    work_item_id: "work-1",
+                    parent_run_id: None,
+                    root_run_id: "maker",
+                    role: "implementation",
+                    harness: "codex",
+                    model: "model",
+                    effort: "medium",
+                    status: "succeeded",
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let limits = CapacityLimits {
+            total: 3,
+            ai: 1,
+            per_repository: 1,
+            per_ticket: 1,
+        };
+        assert_eq!(
+            database
+                .schedule_ci_correction("work-1", "ci-1", limits, 2)
+                .await
+                .unwrap(),
+            CiCorrectionPersistence::Scheduled { cycle: 1 }
+        );
+        let run: (String, String, String, String) =
+            sqlx::query_as("SELECT harness, model, effort, initiator FROM runs WHERE id = 'ci-1'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            run,
+            ("codex".into(), "model".into(), "medium".into(), "ai".into())
+        );
     }
 }
