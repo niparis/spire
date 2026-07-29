@@ -145,12 +145,17 @@ spire new [PATH]
 The command:
 
 1. resolves and validates the canonical local path;
-2. inspects the Git remote, canonical GitHub repository, and default branch;
-3. tests Git access using the runtime user's existing SSH configuration;
-4. asks the operator to select a Linear organization and team;
-5. offers to create a Linear project or select an existing project;
-6. records the Linear-project-to-repository mapping in SQLite; and
-7. reports the resulting mapping and automation state.
+2. registers it as the worktree source and resolves its Git common directory;
+3. inspects the Git remote, canonical GitHub repository, and default branch;
+4. tests Git access using the runtime user's existing SSH configuration;
+5. asks the operator to select a Linear organization and team;
+6. offers to create a Linear project or select an existing project;
+7. records the Linear-project-to-repository mapping in SQLite; and
+8. reports the resulting mapping and automation state.
+
+The registered checkout remains operator-owned. Harnesses run only in
+Spire-allocated worktrees; Spire does not edit, switch, reset, clean, or delete the
+registered checkout.
 
 Linear exposes project creation through its GraphQL `projectCreate` mutation.
 Creating a project is an explicit external write. Spire shows the intended change,
@@ -182,7 +187,8 @@ linear_team_id
 linear_project_id
 linear_project_name_snapshot
 github_repository
-local_repository_path
+repository_source_path
+git_common_directory
 git_remote_url
 default_branch
 enabled
@@ -225,6 +231,8 @@ and webhooks.
   adapters.
 - Repository routing and admission rules belong to the application core.
 - SQLite adapters persist mappings and provisioning operations.
+- Git/worktree adapters implement the accepted
+  [`worktree-first workspace contract`](worktree-first-workspace-ownership.md).
 - The domain and application layers do not import CLI, Linear SDK, GitHub SDK,
   filesystem, SSH, or systemd implementations.
 - No SQLite transaction remains open across Linear, GitHub, Git, or harness IO.
@@ -296,6 +304,7 @@ and webhooks.
 - [Linear GraphQL API](https://linear.app/developers/graphql)
 - [Linear SDK data modification](https://linear.app/developers/sdk-fetching-and-modifying-data)
 - [Linear API changelog recording `projectCreate`](https://linear.app/changelog/page/17)
+- [`worktree-first-workspace-ownership.md`](worktree-first-workspace-ownership.md)
 - `docs/ai_harness_architecture.md`
 - `docs/ai_harness_implementation.md`
 - `docs/decisions/dispatch-policy-v1.md`

@@ -106,13 +106,13 @@ Implementation:
 
 1. Validate the approved GitHub API identity and installation/account metadata.
 2. Inspect `PATH` as an existing local Git repository.
-3. Resolve its canonical path, remote, GitHub repository, and default branch.
-4. Reuse the runtime user's normal SSH configuration.
-5. Query required checks and repository metadata through read-only APIs.
-6. Decide and document whether Spire operates from the selected checkout or creates
-   a managed base clone; never silently choose.
-7. Reject dirty/unsafe repository state only when it affects the chosen workspace
-   model.
+3. Resolve its canonical path and Git common directory as the registered worktree
+   source.
+4. Resolve its remote, GitHub repository, and default branch.
+5. Reuse the runtime user's normal SSH configuration.
+6. Query required checks and repository metadata through read-only APIs.
+7. Verify Git worktree capability without changing the registered checkout.
+8. Reject unsafe repository state that prevents isolated worktree allocation.
 
 Verification:
 
@@ -120,6 +120,7 @@ Verification:
   inaccessible repository, renamed default branch, and path movement.
 - GitHub API authority and Git transport authority remain separate results.
 - Discovery cannot add repository authority before a mapping is committed.
+- Discovery never switches, resets, cleans, or edits the registered checkout.
 
 ### S15.4 Implement harness selection in `spire init`
 
@@ -175,7 +176,7 @@ Verification:
 
 ### S15.6 Add durable provisioning operations
 
-Add `0008_onboarding_provisioning.sql` for provisioning operations. Persist:
+Add `0009_onboarding_provisioning.sql` for provisioning operations. Persist:
 
 ```text
 operation_id
@@ -341,6 +342,6 @@ diagnostics pass, and no automation was enabled.
 - Exact `ProjectCreateInput` fields and permissions until verified against the
   target workspace.
 - Whether webhook creation belongs in `spire init` or a later explicit command.
-- Whether the selected local checkout or a Spire-managed base clone is the
-  long-term repository source.
+- Target-VM behavior when the registered worktree source is itself a linked
+  worktree.
 - Final CLI spelling for project registration and reassignment.
