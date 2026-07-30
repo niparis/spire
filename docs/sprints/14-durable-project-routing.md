@@ -1,6 +1,6 @@
 # Sprint 14 — Durable Project Routing and Worktree Sources
 
-**Last Verified:** 2026-07-29
+**Last Verified:** 2026-07-30
 **Depends on:** Sprint 13 exit criteria
 **Unlocks:** Sprint 15
 
@@ -372,6 +372,24 @@ remove only the owned terminal worktrees through Git-aware cleanup.
 - Review workspaces are separate, detached, exact-SHA, and mutation-detecting.
 - Registered source checkouts remain unchanged and outside cleanup authority.
 - Worktree cleanup is Git-aware, fail-closed, and independent of branch deletion.
+
+## Implementation evidence
+
+- Forward-only migrations `0007_project_repository_mappings.sql` and
+  `0008_worktree_ownership.sql` define revisioned routing authority and owned
+  Git-worktree identity.
+- `ProjectMappingPort`, `LinearProjectReadPort`, and `WorkspacePort` keep provider,
+  SQLite, Git, and filesystem behavior outside the domain/application core.
+- `spire projects list --linear` discovers selectable existing Linear projects;
+  mapping commands remain read-only at providers and revision every SQLite change.
+- Periodic bounded reconciliation heals transient stale health, refreshes diagnostic
+  snapshots through history, and never remaps repository identity.
+- Temporary real-Git fixtures cover maker reuse, detached reviewer isolation,
+  reviewer mutation, allocation crash windows, live-lease cleanup refusal, cleanup
+  restart convergence, source-checkout preservation, and branch retention.
+- Canonical verification is `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace`, and `scripts/check-architecture.sh`.
 
 ## Evidence Sources
 

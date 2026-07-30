@@ -6,10 +6,11 @@ mod user_service;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
-    os::unix::fs::MetadataExt,
+    io::{BufRead, BufReader, Read, Write},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,10 +18,10 @@ use anyhow::{Context, Result};
 use axum::{
     Router,
     body::{Bytes, to_bytes},
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::Response,
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use clap::{Parser, Subcommand};
@@ -31,19 +32,36 @@ use nix::{
 };
 use sha2::Sha256;
 use spire_adapters::{
+    diagnostics::{
+        GitCliProbe, HarnessKind, HarnessProbeSpec, ProcessHarnessProbe, SystemCommandExecutor,
+        SystemdServiceContextProbe,
+    },
     github::{GitHubHttpAdapter, GitHubReconciler},
+    github_app::{
+        GitHubAppApi, GitHubAppHttpApi, GitHubAppManifest, GitHubAppServiceProbe,
+        GitHubAppTokenProvider, SystemClock, approved_installation_permissions,
+    },
     linear::{LinearReadAdapter, load_credential},
-    secrets::UserSecretStore,
+    secrets::{UserAuthenticationMetadataStore, UserSecretStore},
     sqlite::{InboxEvent, LinearObservation, SqliteDatabase},
+    workspace::GitWorkspaceAdapter,
 };
 use spire_application::{
-    AuthenticationState, CanonicalLinearIssue, Config, DiagnosticFinding, DiagnosticReport,
-    EligibilityInput, ExternalResult, LinearReadPort, ManagedSecret, RelevantIssueQuery,
-    SecretStorePort, ValidatedConfig, WebhookAllowlist, WebhookRequest, accept_delivery,
-    dispatch_is_covered, evaluate_eligibility,
+    AuthenticationMetadataStorePort, AuthenticationState, CanonicalLinearIssue, Config,
+    DiagnosticFinding, DiagnosticReport, DiagnosticSeverity, EligibilityInput, ExternalResult,
+    GitHubAuthenticationMetadata, GitTransportProbePort, HarnessProbePort, InstallationProfile,
+    LinearAuthenticationMetadata, LinearProjectReadPort, LinearReadPort, ManagedSecret,
+    MappingRepositoryHealth, NewProjectRepositoryMapping, ProjectMappingPort,
+    ProjectRoutingDecision, RelevantIssueQuery, RepositoryIdentityPort,
+    RepositoryMappingTransitionInput, SecretPromptPort, SecretStorePort,
+    ServiceAuthenticationProbePort, ServiceContextProbePort, ValidatedConfig, WebhookAllowlist,
+    WebhookRequest, accept_delivery, dispatch_is_covered, evaluate_eligibility,
 };
-use spire_domain::{ComplexityClass, HarnessId, LinearIssueId, RunRole};
-use tokio::net::TcpListener;
+use spire_domain::{
+    ComplexityClass, Effort, HarnessId, LinearIssueId, LinearProjectId, ProjectMappingRevision,
+    ProjectMappingStatus, ProjectRepositoryMappingId, RepositoryName, RunRole,
+};
+use tokio::{net::TcpListener, sync::oneshot, time::timeout};
 use tracing::info;
 use uuid::Uuid;
 
@@ -89,6 +107,10 @@ enum Command {
     Doctor {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+    },
+    Projects {
+        #[command(subcommand)]
+        command: ProjectsCommand,
     },
     Dispatch {
         #[command(subcommand)]
@@ -151,6 +173,9 @@ enum AuthCommand {
         /// user. The credential itself is never accepted as an argument.
         #[arg(long)]
         credential_file: Option<PathBuf>,
+        /// Register the GitHub App in this organization; omit for the user account.
+        #[arg(long)]
+        github_owner: Option<String>,
     },
     Rotate {
         service: AuthService,
@@ -170,6 +195,68 @@ enum AuthService {
     Linear,
     #[value(name = "github")]
     GitHub,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectsCommand {
+    List {
+        /// Discover existing Linear projects instead of listing durable mappings.
+        #[arg(long)]
+        linear: bool,
+        #[arg(long, requires = "linear")]
+        include_archived: bool,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Map {
+        #[arg(long)]
+        linear_project_id: String,
+        #[arg(long)]
+        repository_source: PathBuf,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Show {
+        mapping_id: String,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Disable {
+        mapping_id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Remove {
+        mapping_id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Doctor {
+        #[arg(long)]
+        mapping_id: Option<String>,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Preflight {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Reconcile {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -341,11 +428,24 @@ async fn main() -> Result<()> {
         Command::Auth { command } => {
             let paths = resolve_runtime_paths(config_override.as_deref(), system)?;
             match command {
-                AuthCommand::Status { format } => auth_status(paths, format)?,
+                AuthCommand::Status { format } => {
+                    auth_status(paths, config_override.as_deref(), system, format).await?
+                }
                 AuthCommand::Login {
                     service,
                     credential_file,
-                } => auth_login(paths, service, credential_file).await?,
+                    github_owner,
+                } => {
+                    auth_login(
+                        paths,
+                        config_override.as_deref(),
+                        system,
+                        service,
+                        credential_file,
+                        github_owner,
+                    )
+                    .await?
+                }
                 AuthCommand::Rotate {
                     service,
                     credential_file,
@@ -353,10 +453,22 @@ async fn main() -> Result<()> {
                 AuthCommand::Remove { service } => auth_remove(paths, service)?,
             }
         }
-        Command::Doctor { format } => doctor(
-            resolve_runtime_paths(config_override.as_deref(), system)?,
-            format,
-        )?,
+        Command::Doctor { format } => {
+            doctor(
+                resolve_runtime_paths(config_override.as_deref(), system)?,
+                system,
+                format,
+            )
+            .await?
+        }
+        Command::Projects { command } => {
+            projects_command(
+                load_config(config_override.as_deref(), system)?,
+                resolve_runtime_paths(config_override.as_deref(), system)?,
+                command,
+            )
+            .await?
+        }
         Command::Dispatch {
             command: DispatchCommand::DryRun { maker_harness },
         } => dispatch_dry_run(
@@ -421,8 +533,15 @@ async fn main() -> Result<()> {
             let paths = resolve_runtime_paths(config_override.as_deref(), system)?;
             let issue_id = LinearIssueId::new(issue).context("invalid Linear issue ID")?;
             let adapter = linear_adapter(&config, &paths)?;
+            let database = SqliteDatabase::initialize(
+                &config.config.runtime.database_path,
+                config.config.runtime.database_max_connections,
+            )
+            .await?;
             match adapter.get_canonical_issue(&issue_id).await? {
-                ExternalResult::Confirmed(issue) => print_json(&explain_issue(&config, &issue))?,
+                ExternalResult::Confirmed(issue) => {
+                    print_json(&explain_issue(&config, &database, &issue).await?)?
+                }
                 ExternalResult::NotFound => anyhow::bail!("Linear issue was not found"),
                 ExternalResult::Ambiguous { detail } => {
                     anyhow::bail!("ambiguous Linear response: {detail}")
@@ -441,7 +560,13 @@ async fn main() -> Result<()> {
         }
         Command::GitHub {
             command: GitHubCommand::Reconcile,
-        } => github_reconcile(load_config(config_override.as_deref(), system)?).await?,
+        } => {
+            github_reconcile(
+                load_config(config_override.as_deref(), system)?,
+                resolve_runtime_paths(config_override.as_deref(), system)?,
+            )
+            .await?
+        }
         Command::Scheduler {
             command: SchedulerCommand::Once { dry_run },
         } => {
@@ -506,7 +631,13 @@ async fn main() -> Result<()> {
                 &serde_json::json!({"fixture_ticket": fixture_ticket, "dry_linear": true, "dry_github": true, "runner": "disabled_pending_captured_provider_fixtures", "started": false}),
             )?;
         }
-        Command::Serve => serve(load_config(config_override.as_deref(), system)?).await?,
+        Command::Serve => {
+            serve(
+                load_config(config_override.as_deref(), system)?,
+                resolve_runtime_paths(config_override.as_deref(), system)?,
+            )
+            .await?
+        }
     }
     Ok(())
 }
@@ -533,7 +664,472 @@ fn linear_adapter(
         .context("failed to construct read-only Linear adapter")
 }
 
-fn explain_issue(config: &ValidatedConfig, issue: &CanonicalLinearIssue) -> serde_json::Value {
+async fn projects_command(
+    config: ValidatedConfig,
+    paths: spire_application::ResolvedPaths,
+    command: ProjectsCommand,
+) -> Result<()> {
+    let database = SqliteDatabase::initialize(
+        &config.config.runtime.database_path,
+        config.config.runtime.database_max_connections,
+    )
+    .await?;
+    match command {
+        ProjectsCommand::List {
+            linear,
+            include_archived,
+            format,
+        } => {
+            if linear {
+                let projects = list_linear_projects(&config, &paths, include_archived).await?;
+                project_output(
+                    &serde_json::json!({
+                        "source": "linear",
+                        "external_mutations": false,
+                        "projects": projects,
+                    }),
+                    format,
+                )?;
+            } else {
+                project_output(&database.list().await?, format)?;
+            }
+        }
+        ProjectsCommand::Show { mapping_id, format } => {
+            let id = ProjectRepositoryMappingId::parse(&mapping_id)
+                .context("invalid project mapping ID")?;
+            let mapping = database.get(id).await?.context("mapping was not found")?;
+            let history = database.history(id).await?;
+            project_output(
+                &serde_json::json!({"mapping": mapping, "history": history}),
+                format,
+            )?;
+        }
+        ProjectsCommand::Map {
+            linear_project_id,
+            repository_source,
+            reason,
+            yes,
+            format,
+        } => {
+            let project_id =
+                LinearProjectId::new(linear_project_id).context("invalid Linear project ID")?;
+            let linear = linear_adapter(&config, &paths)?;
+            let project = match linear.get_project(&project_id).await? {
+                ExternalResult::Confirmed(project) if !project.is_archived() => project,
+                ExternalResult::Confirmed(_) => anyhow::bail!("Linear project is archived"),
+                ExternalResult::NotFound => anyhow::bail!("Linear project was not found"),
+                ExternalResult::Ambiguous { detail } => {
+                    anyhow::bail!("Linear project lookup was ambiguous: {detail}")
+                }
+            };
+            let inspector = GitWorkspaceAdapter::new(
+                database.clone(),
+                SystemCommandExecutor,
+                "git",
+                config
+                    .config
+                    .operations
+                    .workspace_terminal_retention_seconds,
+            );
+            let source = inspector.inspect_repository_source(&repository_source)?;
+            if !source.worktree_capable {
+                anyhow::bail!("registered repository does not support Git worktrees")
+            }
+            let repository = RepositoryName::new(&source.github_repository)
+                .context("Git remote is not a canonical GitHub repository")?;
+            let github = github_adapter(&config, &paths).await?;
+            let identity = match github.get_repository_identity(&repository).await? {
+                ExternalResult::Confirmed(identity) if !identity.archived => identity,
+                ExternalResult::Confirmed(_) => anyhow::bail!("GitHub repository is archived"),
+                ExternalResult::NotFound => anyhow::bail!("GitHub repository was not found"),
+                ExternalResult::Ambiguous { detail } => {
+                    anyhow::bail!("GitHub repository lookup was ambiguous: {detail}")
+                }
+            };
+            if identity.repository != repository || identity.default_branch != source.default_branch
+            {
+                anyhow::bail!(
+                    "local remote/default branch does not match canonical GitHub identity"
+                )
+            }
+            let proposal = NewProjectRepositoryMapping {
+                linear_organization_id: config.config.linear.organization_id.clone(),
+                linear_team_id: config.config.linear.team_id.clone(),
+                linear_project_id: project.id,
+                linear_project_name_snapshot: project.name,
+                github_repository: repository,
+                repository_source_path: source.source_path,
+                git_common_directory: source.git_common_directory,
+                git_remote_url: source.remote_url,
+                default_branch: source.default_branch,
+            };
+            project_output(
+                &serde_json::json!({"commit": yes, "proposed_mapping": {
+                    "linear_organization_id": proposal.linear_organization_id,
+                    "linear_team_id": proposal.linear_team_id,
+                    "linear_project_id": proposal.linear_project_id,
+                    "linear_project_name_snapshot": proposal.linear_project_name_snapshot,
+                    "github_repository": proposal.github_repository,
+                    "repository_source_path": proposal.repository_source_path,
+                    "git_common_directory": proposal.git_common_directory,
+                    "git_remote_url": proposal.git_remote_url,
+                    "default_branch": proposal.default_branch,
+                }}),
+                format,
+            )?;
+            if !yes {
+                anyhow::bail!("mapping preview only; pass --yes to commit this exact mapping")
+            }
+            let actor = std::env::var("USER").unwrap_or_else(|_| "operator".into());
+            let mapping = database.create(proposal, &actor, reason.as_deref()).await?;
+            project_output(&mapping, format)?;
+        }
+        ProjectsCommand::Disable {
+            mapping_id,
+            expected_revision,
+            reason,
+            format,
+        } => {
+            ensure_mapping_reason(&reason)?;
+            let mapping = database
+                .disable(
+                    ProjectRepositoryMappingId::parse(&mapping_id)?,
+                    ProjectMappingRevision::new(expected_revision)?,
+                    "operator",
+                    &reason,
+                )
+                .await?;
+            project_output(&mapping, format)?;
+        }
+        ProjectsCommand::Remove {
+            mapping_id,
+            expected_revision,
+            reason,
+            format,
+        } => {
+            ensure_mapping_reason(&reason)?;
+            let mapping = database
+                .tombstone(
+                    ProjectRepositoryMappingId::parse(&mapping_id)?,
+                    ProjectMappingRevision::new(expected_revision)?,
+                    "operator",
+                    &reason,
+                )
+                .await?;
+            project_output(&mapping, format)?;
+        }
+        ProjectsCommand::Doctor { mapping_id, format } => {
+            let mappings = select_mappings(&database, mapping_id.as_deref()).await?;
+            let report = diagnose_project_mappings(&config, &paths, &database, mappings).await;
+            let ready = report
+                .iter()
+                .all(|entry| entry["ready"].as_bool() == Some(true));
+            project_output(
+                &serde_json::json!({"ready": ready, "mappings": report}),
+                format,
+            )?;
+            if !ready {
+                anyhow::bail!("one or more project mappings are not ready")
+            }
+        }
+        ProjectsCommand::Preflight { format } => {
+            let configured = config
+                .config
+                .linear
+                .repository_mappings
+                .iter()
+                .map(|mapping| RepositoryMappingTransitionInput {
+                    label: mapping.label.clone(),
+                    repository: mapping.repository.clone(),
+                    enabled: mapping.enabled,
+                })
+                .collect();
+            project_output(
+                &database.project_mapping_preflight(configured).await?,
+                format,
+            )?;
+        }
+        ProjectsCommand::Reconcile { format } => {
+            let report = reconcile_project_mappings(&config, &paths, &database, 0).await?;
+            project_output(&report, format)?;
+        }
+    }
+    Ok(())
+}
+
+async fn list_linear_projects(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+    include_archived: bool,
+) -> Result<Vec<spire_application::CanonicalLinearProject>> {
+    const MAX_PROJECT_PAGES: usize = 20;
+
+    let linear = linear_adapter(config, paths)?;
+    let mut projects = Vec::new();
+    let mut cursor = None;
+    for _ in 0..MAX_PROJECT_PAGES {
+        let page = match linear
+            .list_projects(&spire_application::LinearProjectQuery {
+                cursor: cursor.clone(),
+                include_archived,
+            })
+            .await?
+        {
+            ExternalResult::Confirmed(page) => page,
+            ExternalResult::NotFound => anyhow::bail!("Linear project collection was not found"),
+            ExternalResult::Ambiguous { detail } => {
+                anyhow::bail!("Linear project discovery was ambiguous: {detail}")
+            }
+        };
+        projects.extend(page.projects);
+        let Some(next_cursor) = page.next_cursor else {
+            return Ok(projects);
+        };
+        if cursor.as_deref() == Some(next_cursor.as_str()) {
+            anyhow::bail!("Linear project pagination repeated a cursor")
+        }
+        cursor = Some(next_cursor);
+    }
+    anyhow::bail!("Linear project discovery exceeded the bounded page limit")
+}
+
+async fn select_mappings(
+    database: &SqliteDatabase,
+    mapping_id: Option<&str>,
+) -> Result<Vec<spire_application::ProjectRepositoryMapping>> {
+    if let Some(mapping_id) = mapping_id {
+        let id = ProjectRepositoryMappingId::parse(mapping_id)?;
+        return Ok(vec![
+            database.get(id).await?.context("mapping was not found")?,
+        ]);
+    }
+    database.list().await.map_err(Into::into)
+}
+
+async fn diagnose_project_mappings(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+    database: &SqliteDatabase,
+    mappings: Vec<spire_application::ProjectRepositoryMapping>,
+) -> Vec<serde_json::Value> {
+    let linear = linear_adapter(config, paths);
+    let github = github_adapter(config, paths).await;
+    let inspector = GitWorkspaceAdapter::new(
+        database.clone(),
+        SystemCommandExecutor,
+        "git",
+        config
+            .config
+            .operations
+            .workspace_terminal_retention_seconds,
+    );
+    let mut report = Vec::with_capacity(mappings.len());
+    for mapping in mappings {
+        let mut failures = Vec::new();
+        match &linear {
+            Ok(linear) => match linear.get_project(&mapping.linear_project_id).await {
+                Ok(ExternalResult::Confirmed(project))
+                    if !project.is_archived()
+                        && project.id == mapping.linear_project_id
+                        && project.name == mapping.linear_project_name_snapshot => {}
+                Ok(ExternalResult::Confirmed(project)) if project.is_archived() => {
+                    failures.push("linear_project_archived")
+                }
+                Ok(ExternalResult::Confirmed(_)) => failures.push("linear_project_snapshot_stale"),
+                Ok(ExternalResult::NotFound) => failures.push("linear_project_missing"),
+                _ => failures.push("linear_project_unavailable"),
+            },
+            Err(_) => failures.push("linear_authentication_unavailable"),
+        }
+        match inspector.inspect_repository_source(&mapping.repository_source_path) {
+            Ok(source)
+                if source.git_common_directory == mapping.git_common_directory
+                    && source.remote_url == mapping.git_remote_url
+                    && source.github_repository == mapping.github_repository.as_str()
+                    && source.default_branch == mapping.default_branch
+                    && source.worktree_capable => {}
+            Ok(_) => failures.push("local_repository_snapshot_stale"),
+            Err(_) => failures.push("local_repository_unavailable"),
+        }
+        match &github {
+            Ok(github) => match github
+                .get_repository_identity(&mapping.github_repository)
+                .await
+            {
+                Ok(ExternalResult::Confirmed(identity))
+                    if !identity.archived
+                        && identity.repository == mapping.github_repository
+                        && identity.default_branch == mapping.default_branch => {}
+                Ok(ExternalResult::Confirmed(identity)) if identity.archived => {
+                    failures.push("github_repository_archived")
+                }
+                Ok(ExternalResult::Confirmed(_)) => {
+                    failures.push("github_repository_snapshot_stale")
+                }
+                Ok(ExternalResult::NotFound) => failures.push("github_repository_missing"),
+                _ => failures.push("github_repository_unavailable"),
+            },
+            Err(_) => failures.push("github_authentication_unavailable"),
+        }
+        report.push(serde_json::json!({
+            "mapping_id": mapping.id,
+            "revision": mapping.revision,
+            "ready": failures.is_empty() && mapping.status == ProjectMappingStatus::Enabled,
+            "status": mapping.status,
+            "failures": failures,
+        }));
+    }
+    report
+}
+
+async fn reconcile_project_mappings(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+    database: &SqliteDatabase,
+    offset: usize,
+) -> Result<serde_json::Value> {
+    const MAX_MAPPINGS_PER_PASS: usize = 100;
+
+    let mappings = database.list().await?;
+    let enabled_count = mappings
+        .iter()
+        .filter(|mapping| mapping.status == ProjectMappingStatus::Enabled)
+        .count();
+    let offset = offset.min(enabled_count);
+    let linear = linear_adapter(config, paths)?;
+    let github = github_adapter(config, paths).await?;
+    let inspector = GitWorkspaceAdapter::new(
+        database.clone(),
+        SystemCommandExecutor,
+        "git",
+        config
+            .config
+            .operations
+            .workspace_terminal_retention_seconds,
+    );
+    let mut inspected = 0_u64;
+    let mut revised = 0_u64;
+    let mut stale = 0_u64;
+    for mapping in mappings
+        .into_iter()
+        .filter(|mapping| mapping.status == ProjectMappingStatus::Enabled)
+        .skip(offset)
+        .take(MAX_MAPPINGS_PER_PASS)
+    {
+        inspected += 1;
+        let mut next = mapping.clone();
+        let mut provider_unavailable = false;
+        let mut authority_unhealthy = false;
+        match linear.get_project(&mapping.linear_project_id).await {
+            Ok(ExternalResult::Confirmed(project)) if !project.is_archived() => {
+                next.linear_project_name_snapshot = project.name;
+            }
+            Ok(ExternalResult::Confirmed(_) | ExternalResult::NotFound) => {
+                authority_unhealthy = true;
+            }
+            _ => provider_unavailable = true,
+        }
+        match github
+            .get_repository_identity(&mapping.github_repository)
+            .await
+        {
+            Ok(ExternalResult::Confirmed(identity)) if !identity.archived => {
+                if identity.repository == mapping.github_repository {
+                    next.default_branch = identity.default_branch;
+                } else {
+                    authority_unhealthy = true;
+                }
+            }
+            Ok(ExternalResult::Confirmed(_) | ExternalResult::NotFound) => {
+                authority_unhealthy = true;
+            }
+            _ => provider_unavailable = true,
+        }
+        match inspector.inspect_repository_source(&mapping.repository_source_path) {
+            Ok(source)
+                if source.github_repository == mapping.github_repository.as_str()
+                    && source.git_common_directory == mapping.git_common_directory =>
+            {
+                next.git_remote_url = source.remote_url;
+                if next.default_branch != source.default_branch {
+                    authority_unhealthy = true;
+                }
+            }
+            _ => authority_unhealthy = true,
+        }
+        next.repository_health =
+            reconciled_mapping_health(authority_unhealthy, provider_unavailable);
+        if next.repository_health != MappingRepositoryHealth::Healthy {
+            stale += 1;
+        }
+        if next.linear_project_name_snapshot != mapping.linear_project_name_snapshot
+            || next.default_branch != mapping.default_branch
+            || next.git_remote_url != mapping.git_remote_url
+            || next.repository_health != mapping.repository_health
+        {
+            database
+                .revise(
+                    next,
+                    mapping.revision,
+                    "reconciler",
+                    "refresh canonical project and repository snapshots",
+                )
+                .await?;
+            revised += 1;
+        }
+    }
+    let next_offset = if offset + inspected as usize >= enabled_count {
+        0
+    } else {
+        offset + inspected as usize
+    };
+    Ok(serde_json::json!({
+        "inspected": inspected,
+        "revised": revised,
+        "stale_or_unhealthy": stale,
+        "enabled_total": enabled_count,
+        "bounded_limit": MAX_MAPPINGS_PER_PASS,
+        "remaining": enabled_count.saturating_sub(offset + inspected as usize),
+        "next_offset": next_offset,
+        "external_mutations": false,
+    }))
+}
+
+fn reconciled_mapping_health(
+    authority_unhealthy: bool,
+    provider_unavailable: bool,
+) -> MappingRepositoryHealth {
+    if authority_unhealthy {
+        MappingRepositoryHealth::Unhealthy
+    } else if provider_unavailable {
+        MappingRepositoryHealth::Stale
+    } else {
+        MappingRepositoryHealth::Healthy
+    }
+}
+
+fn ensure_mapping_reason(reason: &str) -> Result<()> {
+    if reason.trim().is_empty() || reason.len() > 1024 {
+        anyhow::bail!("mapping reason must contain 1 to 1024 characters")
+    }
+    Ok(())
+}
+
+fn project_output(value: &impl serde::Serialize, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => print_json(value),
+        OutputFormat::Text => {
+            println!("{}", serde_yaml::to_string(value)?);
+            Ok(())
+        }
+    }
+}
+
+async fn explain_issue(
+    config: &ValidatedConfig,
+    database: &SqliteDatabase,
+    issue: &CanonicalLinearIssue,
+) -> Result<serde_json::Value> {
     let supported_types = config
         .config
         .linear
@@ -548,11 +1144,19 @@ fn explain_issue(config: &ValidatedConfig, issue: &CanonicalLinearIssue) -> serd
         .iter()
         .map(|(estimate, class)| (estimate.value(), *class))
         .collect::<BTreeMap<_, _>>();
+    let project_routing = match issue.project_id.as_ref() {
+        Some(project_id) => {
+            database
+                .resolve(&config.config.linear.organization_id, project_id)
+                .await?
+        }
+        None => ProjectRoutingDecision::RepositoryUnmapped,
+    };
     let eligibility = evaluate_eligibility(EligibilityInput {
         issue,
         ready_state_id: &config.config.linear.ready_state_id,
         supported_type_labels: &supported_types,
-        repository_mappings: &config.config.linear.repository_mappings,
+        project_routing: &project_routing,
         complexity_mapping: &complexity_mapping,
         incomplete_blockers: &BTreeSet::new(),
         locally_active: false,
@@ -562,7 +1166,9 @@ fn explain_issue(config: &ValidatedConfig, issue: &CanonicalLinearIssue) -> serd
             .and_then(|value| complexity_mapping.get(&value).copied())
             .is_some_and(|class| dispatch_is_covered(&config.policy, &config.capabilities, class)),
     });
-    serde_json::json!({"issue": issue, "eligibility": eligibility, "linear_writes_enabled": false})
+    Ok(
+        serde_json::json!({"issue": issue, "eligibility": eligibility, "linear_writes_enabled": false}),
+    )
 }
 
 async fn linear_reconcile(
@@ -593,7 +1199,7 @@ async fn linear_reconcile(
             }
         };
         for issue in page.issues {
-            let report = explain_issue(&config, &issue);
+            let report = explain_issue(&config, &database, &issue).await?;
             let eligibility = report.get("eligibility").cloned().unwrap_or_default();
             let complexity = eligibility
                 .get("complexity")
@@ -611,6 +1217,8 @@ async fn linear_reconcile(
                         linear_identifier: &issue.identifier,
                         team_id: &issue.team_id,
                         workflow_state_id: &issue.workflow_state_id,
+                        linear_project_id: issue.project_id.as_ref().map(|id| id.as_str()),
+                        linear_project_name_snapshot: issue.project_name_snapshot.as_deref(),
                         revision: &issue.revision,
                         raw_estimate: issue.estimate,
                         complexity_class: complexity,
@@ -629,13 +1237,16 @@ async fn linear_reconcile(
     )
 }
 
-async fn github_reconcile(config: ValidatedConfig) -> Result<()> {
+async fn github_reconcile(
+    config: ValidatedConfig,
+    paths: spire_application::ResolvedPaths,
+) -> Result<()> {
     let database = SqliteDatabase::initialize(
         &config.config.runtime.database_path,
         config.config.runtime.database_max_connections,
     )
     .await?;
-    let github = github_adapter(&config)?;
+    let github = github_adapter(&config, &paths).await?;
     let report = GitHubReconciler::new(&database, &github)
         .reconcile_active_pull_requests(unix_now())
         .await?;
@@ -745,7 +1356,10 @@ fn dated_backups(root: &std::path::Path) -> Result<Vec<fs::DirEntry>> {
     Ok(backups)
 }
 
-fn github_adapter(config: &ValidatedConfig) -> Result<GitHubHttpAdapter> {
+async fn github_adapter(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+) -> Result<GitHubHttpAdapter> {
     let repositories = config
         .config
         .github
@@ -753,10 +1367,13 @@ fn github_adapter(config: &ValidatedConfig) -> Result<GitHubHttpAdapter> {
         .iter()
         .map(|entry| spire_domain::RepositoryName::new(entry.repository.clone()))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    let token = load_credential(&config.config.github.credential_ref)
-        .context("failed to load GitHub credential")?;
+    let token = github_token_provider(config, paths)
+        .context("failed to construct GitHub App authentication")?
+        .installation_token()
+        .await
+        .context("failed to mint a GitHub App installation token")?;
     Ok(GitHubHttpAdapter::new(
-        token,
+        token.expose_to_github_adapter().to_owned(),
         repositories,
         Duration::from_secs(config.config.github.request_timeout_seconds),
     )?)
@@ -788,28 +1405,81 @@ fn print_paths(paths: spire_application::ResolvedPaths, format: OutputFormat) ->
     Ok(())
 }
 
-fn auth_status(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Result<()> {
+async fn auth_status(
+    paths: spire_application::ResolvedPaths,
+    config_override: Option<&std::path::Path>,
+    system: bool,
+    format: OutputFormat,
+) -> Result<()> {
     if paths.profile != spire_application::InstallationProfile::User {
         anyhow::bail!(
             "system-profile authentication requires its separate credential-store adapter; no user secret store was consulted"
         );
     }
     let store = UserSecretStore::below_config_root(&paths.config_root);
-    let report = secret_status_report(&store);
+    let mut findings = secret_configuration_findings(&store);
+    match load_config(config_override, system) {
+        Ok(config) => {
+            match linear_adapter(&config, &paths) {
+                Ok(linear) => match linear.probe_service("linear").await {
+                    Ok(probe) => findings.push(service_probe_finding("SPIRE-AUTH-010", probe)),
+                    Err(_) => findings.push(DiagnosticFinding::required_authentication(
+                        "SPIRE-AUTH-010",
+                        AuthenticationState::Ambiguous,
+                        "Linear authentication probe failed without trusted evidence",
+                        Some("run spire auth rotate linear".into()),
+                    )),
+                },
+                Err(_) => findings.push(DiagnosticFinding::required_authentication(
+                    "SPIRE-AUTH-010",
+                    AuthenticationState::Unavailable,
+                    "Linear authentication is not configured",
+                    Some("run spire auth login linear".into()),
+                )),
+            }
+            match github_service_probe(&config, &paths).await {
+                Ok(probe) => findings.push(service_probe_finding("SPIRE-AUTH-020", probe)),
+                Err(error) => findings.push(DiagnosticFinding::required_authentication(
+                    "SPIRE-AUTH-020",
+                    AuthenticationState::Ambiguous,
+                    "GitHub App authentication could not be verified",
+                    Some(format!(
+                        "run spire auth login github or inspect the installation: {error}"
+                    )),
+                )),
+            }
+        }
+        Err(_) => findings.push(DiagnosticFinding::required(
+            "SPIRE-AUTH-000",
+            AuthenticationState::Unavailable,
+            "configuration is required for provider authentication probes",
+            Some("run spire config validate".into()),
+        )),
+    }
+    let report = DiagnosticReport::from_findings(findings);
     print_diagnostic_report(&report, format)?;
     Ok(())
 }
 
 async fn auth_login(
     paths: spire_application::ResolvedPaths,
+    config_override: Option<&std::path::Path>,
+    system: bool,
     service: AuthService,
     credential_file: Option<PathBuf>,
+    github_owner: Option<String>,
 ) -> Result<()> {
     match service {
         AuthService::Linear => install_linear_credential(paths, credential_file, false).await,
-        AuthService::GitHub => anyhow::bail!(
-            "GitHub App registration is not implemented; no credential was accepted or stored"
-        ),
+        AuthService::GitHub => {
+            if credential_file.is_some() {
+                anyhow::bail!(
+                    "GitHub App registration never accepts a private key or webhook secret file"
+                )
+            }
+            let config = load_config(config_override, system)?;
+            register_github_app(paths, &config, github_owner).await
+        }
     }
 }
 
@@ -821,7 +1491,7 @@ async fn auth_rotate(
     match service {
         AuthService::Linear => install_linear_credential(paths, credential_file, true).await,
         AuthService::GitHub => anyhow::bail!(
-            "GitHub App key rotation is not implemented; no credential was accepted or stored"
+            "GitHub App private-key rotation requires a GitHub-generated replacement; no key was accepted through process arguments"
         ),
     }
 }
@@ -841,7 +1511,20 @@ fn auth_remove(paths: spire_application::ResolvedPaths, service: AuthService) ->
             Ok(())
         }
         AuthService::GitHub => {
-            anyhow::bail!("GitHub App removal is not implemented; no credential was removed")
+            let store = UserSecretStore::below_config_root(&paths.config_root);
+            store
+                .remove_many(&[
+                    ManagedSecret::GitHubAppPrivateKey,
+                    ManagedSecret::GitHubWebhookSecret,
+                ])
+                .context("failed to remove the GitHub App credential bundle")?;
+            let metadata_store =
+                UserAuthenticationMetadataStore::below_config_root(&paths.config_root);
+            let mut metadata = metadata_store.load()?;
+            metadata.github = None;
+            metadata_store.store(&metadata)?;
+            println!("GitHub App authentication removed; Spire is now non-ready");
+            Ok(())
         }
     }
 }
@@ -866,6 +1549,17 @@ async fn install_linear_credential(
     store
         .replace(ManagedSecret::LinearApiKey, credential)
         .context("failed to activate the verified Linear credential")?;
+    let metadata_store = UserAuthenticationMetadataStore::below_config_root(&paths.config_root);
+    let mut metadata = metadata_store.load()?;
+    metadata.linear = Some(LinearAuthenticationMetadata {
+        viewer_id: identity.viewer_id.clone(),
+        organization_id: identity.organization_id.clone(),
+        verified_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    });
+    metadata_store.store(&metadata)?;
     println!(
         "Linear authentication {} for viewer {} in organization {}",
         if rotation { "rotated" } else { "configured" },
@@ -873,6 +1567,186 @@ async fn install_linear_credential(
         identity.organization_id
     );
     Ok(())
+}
+
+#[derive(Clone)]
+struct ManifestFlowState {
+    form_action: Arc<str>,
+    manifest: Arc<str>,
+    expected_state: Arc<str>,
+    code_sender: Arc<Mutex<Option<oneshot::Sender<String>>>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ManifestCallback {
+    code: Option<String>,
+    state: Option<String>,
+}
+
+async fn manifest_start(State(state): State<ManifestFlowState>) -> Html<String> {
+    Html(format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Register Spire GitHub App</title>\
+         <p>Continue to GitHub to review and create the preconfigured Spire App.</p>\
+         <form method=\"post\" action=\"{}\">\
+         <input type=\"hidden\" name=\"manifest\" value=\"{}\">\
+         <button type=\"submit\">Continue to GitHub</button></form>",
+        html_attribute(&state.form_action),
+        html_attribute(&state.manifest),
+    ))
+}
+
+async fn manifest_callback(
+    State(flow): State<ManifestFlowState>,
+    Query(callback): Query<ManifestCallback>,
+) -> impl IntoResponse {
+    let Some(code) = callback
+        .code
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "GitHub did not return a usable one-time manifest code",
+        );
+    };
+    if callback.state.as_deref() != Some(flow.expected_state.as_ref()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "GitHub App registration state did not match",
+        );
+    }
+    let Some(sender) = flow
+        .code_sender
+        .lock()
+        .ok()
+        .and_then(|mut value| value.take())
+    else {
+        return (
+            StatusCode::CONFLICT,
+            "GitHub App registration was already completed",
+        );
+    };
+    if sender.send(code).is_err() {
+        return (
+            StatusCode::GONE,
+            "Spire is no longer waiting for this registration",
+        );
+    }
+    (
+        StatusCode::OK,
+        "GitHub App registration received. Return to the Spire terminal.",
+    )
+}
+
+async fn register_github_app(
+    paths: spire_application::ResolvedPaths,
+    config: &ValidatedConfig,
+    github_owner: Option<String>,
+) -> Result<()> {
+    ensure_user_auth_profile(&paths)?;
+    if let Some(owner) = github_owner.as_deref()
+        && !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        anyhow::bail!("--github-owner contains an unsafe character")
+    }
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .context("unable to bind the loopback GitHub App callback")?;
+    let address = listener.local_addr()?;
+    let redirect_url = format!("http://{address}/callback");
+    let webhook_hostname = &config.config.cloudflare.webhook_hostname;
+    let manifest = GitHubAppManifest::spire(
+        format!("Spire {}", &Uuid::new_v4().simple().to_string()[..8]),
+        format!("https://{webhook_hostname}"),
+        redirect_url,
+        format!("https://{webhook_hostname}/webhooks/github"),
+        false,
+    );
+    let state_token = Uuid::new_v4().simple().to_string();
+    let registration_url = match github_owner {
+        Some(owner) => format!(
+            "https://github.com/organizations/{}/settings/apps/new?state={state_token}",
+            urlencoding::encode(&owner)
+        ),
+        None => format!("https://github.com/settings/apps/new?state={state_token}"),
+    };
+    let (code_sender, code_receiver) = oneshot::channel();
+    let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+    let flow = ManifestFlowState {
+        form_action: registration_url.into(),
+        manifest: serde_json::to_string(&manifest)?.into(),
+        expected_state: state_token.into(),
+        code_sender: Arc::new(Mutex::new(Some(code_sender))),
+    };
+    let router = Router::new()
+        .route("/", get(manifest_start))
+        .route("/callback", get(manifest_callback))
+        .with_state(flow);
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async {
+                let _ = shutdown_receiver.await;
+            })
+            .await
+    });
+    println!("Open http://{address}/ to register the preconfigured GitHub App.");
+    println!("Spire will wait up to ten minutes for GitHub's loopback callback.");
+    let code = timeout(Duration::from_secs(600), code_receiver)
+        .await
+        .context("GitHub App registration timed out without changing credentials")?
+        .context("GitHub App callback closed without a code")?;
+    let _ = shutdown_sender.send(());
+    server
+        .await
+        .context("GitHub App callback task failed")?
+        .context("GitHub App callback server failed")?;
+
+    let conversion = GitHubAppHttpApi::new(Duration::from_secs(
+        config.config.github.request_timeout_seconds,
+    ))?
+    .exchange_manifest_code(&code)
+    .await
+    .context("GitHub rejected the one-time manifest conversion code")?;
+    let store = UserSecretStore::below_config_root(&paths.config_root);
+    store
+        .replace_many(vec![
+            (
+                ManagedSecret::GitHubAppPrivateKey,
+                spire_application::SecretInput::new(conversion.private_key_pem),
+            ),
+            (
+                ManagedSecret::GitHubWebhookSecret,
+                spire_application::SecretInput::new(conversion.webhook_secret),
+            ),
+        ])
+        .context("failed to activate the GitHub App credential bundle")?;
+    let metadata_store = UserAuthenticationMetadataStore::below_config_root(&paths.config_root);
+    let mut metadata = metadata_store.load()?;
+    metadata.github = Some(GitHubAuthenticationMetadata {
+        app_id: conversion.app_id,
+        app_slug: conversion.app_slug,
+        client_id: conversion.client_id,
+        html_url: conversion.html_url.clone(),
+        verified_at_unix: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    });
+    metadata_store.store(&metadata)?;
+    println!("GitHub App registered: {}", conversion.html_url);
+    println!(
+        "Install the App on the configured repositories, then set the non-secret github.installation_id and run spire doctor."
+    );
+    Ok(())
+}
+
+fn html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn ensure_user_auth_profile(paths: &spire_application::ResolvedPaths) -> Result<()> {
@@ -887,55 +1761,78 @@ fn ensure_user_auth_profile(paths: &spire_application::ResolvedPaths) -> Result<
 fn read_secret_input(credential_file: Option<PathBuf>) -> Result<spire_application::SecretInput> {
     match credential_file {
         Some(path) => read_protected_secret_file(&path),
-        None => read_secret_from_tty(),
+        None => TtySecretPrompt.prompt_secret("Linear API key: "),
     }
 }
 
 fn read_protected_secret_file(path: &std::path::Path) -> Result<spire_application::SecretInput> {
-    let metadata = fs::symlink_metadata(path)
+    const MAX_SECRET_FILE_BYTES: u64 = 1024 * 1024;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("unable to open credential file {}", path.display()))?;
+    let metadata = file
+        .metadata()
         .with_context(|| format!("unable to inspect credential file {}", path.display()))?;
-    if metadata.file_type().is_symlink()
-        || !metadata.file_type().is_file()
+    if !metadata.file_type().is_file()
         || metadata.uid() != Uid::current().as_raw()
         || metadata.mode() & 0o777 != 0o600
     {
         anyhow::bail!("credential file must be an owner-only regular 0600 file")
     }
-    let value = fs::read_to_string(path)
+    let mut bytes = Vec::new();
+    file.take(MAX_SECRET_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("unable to read credential file {}", path.display()))?;
+    if bytes.len() as u64 > MAX_SECRET_FILE_BYTES {
+        anyhow::bail!("credential file exceeds the one MiB input limit")
+    }
+    let value = String::from_utf8(bytes).context("credential file must contain UTF-8 text")?;
     Ok(spire_application::SecretInput::new(
         value.trim_end_matches(['\r', '\n']).to_owned(),
     ))
 }
 
-fn read_secret_from_tty() -> Result<spire_application::SecretInput> {
-    let mut terminal = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")
-        .context("a TTY or --credential-file is required to provide a credential")?;
-    terminal.write_all(b"Linear API key: ")?;
-    terminal.flush()?;
-    let original = termios::tcgetattr(&terminal).context("unable to read TTY settings")?;
-    let mut hidden = original.clone();
-    hidden.local_flags.remove(LocalFlags::ECHO);
-    termios::tcsetattr(&terminal, SetArg::TCSANOW, &hidden)
-        .context("unable to disable terminal echo")?;
-    let mut value = String::new();
-    let read_result = {
-        let mut reader = BufReader::new(&terminal);
-        reader.read_line(&mut value)
-    };
-    let restore_result = termios::tcsetattr(&terminal, SetArg::TCSANOW, &original);
-    terminal.write_all(b"\n")?;
-    restore_result.context("unable to restore terminal echo")?;
-    read_result.context("unable to read credential from the TTY")?;
-    Ok(spire_application::SecretInput::new(
-        value.trim_end_matches(['\r', '\n']).to_owned(),
-    ))
+struct TtySecretPrompt;
+
+impl SecretPromptPort for TtySecretPrompt {
+    type Error = anyhow::Error;
+
+    fn prompt_secret(&self, prompt: &str) -> Result<spire_application::SecretInput> {
+        let mut terminal = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .context("a TTY or --credential-file is required to provide a credential")?;
+        terminal.write_all(prompt.as_bytes())?;
+        terminal.flush()?;
+        let original = termios::tcgetattr(&terminal).context("unable to read TTY settings")?;
+        let mut hidden = original.clone();
+        hidden.local_flags.remove(LocalFlags::ECHO);
+        termios::tcsetattr(&terminal, SetArg::TCSANOW, &hidden)
+            .context("unable to disable terminal echo")?;
+        let mut value = String::new();
+        let read_result = {
+            let mut reader = BufReader::new(&terminal);
+            reader.read_line(&mut value)
+        };
+        let restore_result = termios::tcsetattr(&terminal, SetArg::TCSANOW, &original);
+        terminal.write_all(b"\n")?;
+        restore_result.context("unable to restore terminal echo")?;
+        read_result.context("unable to read credential from the TTY")?;
+        Ok(spire_application::SecretInput::new(
+            value.trim_end_matches(['\r', '\n']).to_owned(),
+        ))
+    }
 }
 
-fn doctor(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Result<()> {
+async fn doctor(
+    paths: spire_application::ResolvedPaths,
+    system: bool,
+    format: OutputFormat,
+) -> Result<()> {
     let mut findings = Vec::new();
     findings.push(DiagnosticFinding::required(
         "SPIRE-DIAG-001",
@@ -944,9 +1841,11 @@ fn doctor(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Resu
         None,
     ));
 
-    let configuration_state = match load_config(Some(&paths.config_file), false) {
-        Ok(_) => AuthenticationState::Configured,
-        Err(_) => AuthenticationState::Unavailable,
+    let config = load_config(Some(&paths.config_file), system);
+    let configuration_state = if config.is_ok() {
+        AuthenticationState::Configured
+    } else {
+        AuthenticationState::Unavailable
     };
     findings.push(DiagnosticFinding::required(
         "SPIRE-DIAG-002",
@@ -958,23 +1857,221 @@ fn doctor(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Resu
         )),
     ));
 
-    if paths.profile == spire_application::InstallationProfile::User {
-        findings.extend(
-            secret_status_report(&UserSecretStore::below_config_root(&paths.config_root)).findings,
-        );
-    } else {
-        findings.push(DiagnosticFinding::required(
-            "SPIRE-AUTH-004",
-            AuthenticationState::Unsupported,
-            "system-profile secret-store diagnostics are not implemented",
-            Some("use the advanced system credential-store adapter".into()),
+    let Some(config) = config.ok() else {
+        let report = DiagnosticReport::from_findings(findings);
+        print_diagnostic_report(&report, format)?;
+        anyhow::bail!("Spire diagnostics are not ready")
+    };
+
+    match SqliteDatabase::initialize(
+        &config.config.runtime.database_path,
+        config.config.runtime.database_max_connections,
+    )
+    .await
+    {
+        Ok(database) if database.check_integrity().await.is_ok() => {
+            findings.push(DiagnosticFinding::required(
+                "SPIRE-DIAG-003",
+                AuthenticationState::Configured,
+                "SQLite migrations are current and integrity_check passed",
+                None,
+            ));
+        }
+        _ => findings.push(DiagnosticFinding::required(
+            "SPIRE-DIAG-003",
+            AuthenticationState::Unavailable,
+            "SQLite migrations or integrity check failed",
+            Some(format!(
+                "spire db check --database {}",
+                config.config.runtime.database_path.display()
+            )),
+        )),
+    }
+
+    if paths.profile == InstallationProfile::User {
+        findings.extend(secret_configuration_findings(
+            &UserSecretStore::below_config_root(&paths.config_root),
         ));
     }
+    match linear_adapter(&config, &paths) {
+        Ok(linear) => match linear.probe_service("linear").await {
+            Ok(probe) => findings.push(service_probe_finding("SPIRE-AUTH-010", probe)),
+            Err(_) => findings.push(DiagnosticFinding::required_authentication(
+                "SPIRE-AUTH-010",
+                AuthenticationState::Ambiguous,
+                "Linear authentication response was not understood",
+                Some("run spire auth rotate linear".into()),
+            )),
+        },
+        Err(_) => findings.push(DiagnosticFinding::required_authentication(
+            "SPIRE-AUTH-010",
+            AuthenticationState::Unavailable,
+            "Linear authentication is unavailable",
+            Some("run spire auth login linear".into()),
+        )),
+    }
+    match github_service_probe(&config, &paths).await {
+        Ok(probe) => findings.push(service_probe_finding("SPIRE-AUTH-020", probe)),
+        Err(error) => findings.push(DiagnosticFinding::required_authentication(
+            "SPIRE-AUTH-020",
+            AuthenticationState::Ambiguous,
+            "GitHub App installation identity or permissions could not be verified",
+            Some(format!(
+                "repair GitHub App authentication, then retry: {error}"
+            )),
+        )),
+    }
+
+    for (index, role) in [
+        &config.config.harnesses.maker,
+        &config.config.harnesses.reviewer,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let harness = role.provider.as_str();
+        let kind = match harness {
+            "codex" => HarnessKind::Codex,
+            "claude-code" => HarnessKind::ClaudeCode,
+            _ => {
+                findings.push(DiagnosticFinding::required_authentication(
+                    format!("SPIRE-HARNESS-{}", index + 1),
+                    AuthenticationState::Unsupported,
+                    format!("unsupported harness provider {harness}"),
+                    None,
+                ));
+                continue;
+            }
+        };
+        let probe = ProcessHarnessProbe::new(
+            SystemCommandExecutor,
+            HarnessProbeSpec {
+                kind,
+                executable: PathBuf::from(if kind == HarnessKind::ClaudeCode {
+                    "claude"
+                } else {
+                    "codex"
+                }),
+                configured_models: vec![role.model.as_str().to_owned()],
+                configured_efforts: vec![effort_name(role.effort).into()],
+            },
+        );
+        match probe.probe_harness(harness) {
+            Ok(probe) => findings.push(DiagnosticFinding::required_authentication(
+                format!("SPIRE-HARNESS-{}", index + 1),
+                probe.state,
+                format!(
+                    "{} {} authentication ({:?} confidence)",
+                    probe.harness,
+                    probe.version.as_deref().unwrap_or("unknown version"),
+                    probe.confidence
+                ),
+                probe.remediation,
+            )),
+            Err(error) => findings.push(DiagnosticFinding::required_authentication(
+                format!("SPIRE-HARNESS-{}", index + 1),
+                AuthenticationState::Unavailable,
+                format!("{harness} diagnostic failed"),
+                Some(error.to_string()),
+            )),
+        }
+    }
+
+    if let Some(repository) = config.config.github.repositories.first() {
+        match GitCliProbe::new(SystemCommandExecutor, "git", &repository.workspace_root)
+            .probe_git_transport()
+        {
+            Ok(probe) => {
+                findings.push(DiagnosticFinding::required_authentication(
+                    "SPIRE-GIT-001",
+                    probe.fetch_state,
+                    format!(
+                        "Git fetch access for {} ({})",
+                        probe
+                            .canonical_repository
+                            .as_deref()
+                            .unwrap_or("unrecognized remote"),
+                        probe.remote_url.as_deref().unwrap_or("missing origin")
+                    ),
+                    probe.remediation,
+                ));
+                findings.push(DiagnosticFinding::optional(
+                    "SPIRE-GIT-002",
+                    probe.push_state,
+                    DiagnosticSeverity::Warning,
+                    "Git push authority remains unverified by a non-mutating probe",
+                    Some(
+                        "verify branch publication authority before enabling production writes"
+                            .into(),
+                    ),
+                ));
+                if probe.ephemeral_agent_risk {
+                    findings.push(DiagnosticFinding::required(
+                        "SPIRE-GIT-003",
+                        AuthenticationState::Unavailable,
+                        "SSH agent state may not survive logout or reboot",
+                        Some(
+                            "use a runtime-user SSH identity available to the user service".into(),
+                        ),
+                    ));
+                }
+            }
+            Err(error) => findings.push(DiagnosticFinding::required_authentication(
+                "SPIRE-GIT-001",
+                AuthenticationState::Unavailable,
+                "Git/SSH fetch access could not be verified",
+                Some(error.to_string()),
+            )),
+        }
+    }
+
+    let runtime_user = std::env::var("USER").unwrap_or_else(|_| "CURRENT_USER".into());
+    match SystemdServiceContextProbe::new(SystemCommandExecutor, runtime_user)
+        .probe_service_context()
+    {
+        Ok(probe) => findings.push(DiagnosticFinding::required_authentication(
+            "SPIRE-SERVICE-001",
+            probe.state,
+            format!(
+                "user service installed={}, active={}, lingering={}",
+                probe.unit_installed, probe.unit_active, probe.lingering_enabled
+            ),
+            probe.remediation,
+        )),
+        Err(error) => findings.push(DiagnosticFinding::required_authentication(
+            "SPIRE-SERVICE-001",
+            AuthenticationState::Unavailable,
+            "service runtime context could not be inspected",
+            Some(error.to_string()),
+        )),
+    }
     findings.push(DiagnosticFinding::required(
-        "SPIRE-AUTH-005",
-        AuthenticationState::Unsupported,
-        "GitHub App authentication lifecycle is not implemented",
-        Some("complete GitHub App manifest onboarding and installation verification".into()),
+        "SPIRE-ROLLOUT-001",
+        if !config.config.rollout.linear_writes_enabled {
+            AuthenticationState::Configured
+        } else {
+            AuthenticationState::Unavailable
+        },
+        "production automation remains disabled during authentication diagnostics",
+        config
+            .config
+            .rollout
+            .linear_writes_enabled
+            .then(|| "set rollout.linear_writes_enabled=false until onboarding completes".into()),
+    ));
+    findings.push(DiagnosticFinding::required(
+        "SPIRE-AUTHORITY-001",
+        if !config.config.security.credential_can_merge {
+            AuthenticationState::Configured
+        } else {
+            AuthenticationState::PermissionDenied
+        },
+        "GitHub credential merge authority is disabled",
+        config
+            .config
+            .security
+            .credential_can_merge
+            .then(|| "remove merge authority before enabling Spire".into()),
     ));
     let report = DiagnosticReport::from_findings(findings);
     print_diagnostic_report(&report, format)?;
@@ -984,19 +2081,24 @@ fn doctor(paths: spire_application::ResolvedPaths, format: OutputFormat) -> Resu
     Ok(())
 }
 
-fn secret_status_report(store: &UserSecretStore) -> DiagnosticReport {
+fn secret_configuration_findings(store: &UserSecretStore) -> Vec<DiagnosticFinding> {
     let finding = |code: &str, secret: ManagedSecret, provider: &str, remediation: &str| {
         let state = store
             .status(secret)
             .unwrap_or(AuthenticationState::Ambiguous);
-        DiagnosticFinding::required(
+        DiagnosticFinding::optional(
             code,
             state,
+            if state == AuthenticationState::Configured {
+                DiagnosticSeverity::Info
+            } else {
+                DiagnosticSeverity::Warning
+            },
             format!("{provider} service credential bundle status"),
             (!state.is_ready()).then_some(remediation.to_owned()),
         )
     };
-    DiagnosticReport::from_findings(vec![
+    vec![
         finding(
             "SPIRE-AUTH-001",
             ManagedSecret::LinearApiKey,
@@ -1015,7 +2117,100 @@ fn secret_status_report(store: &UserSecretStore) -> DiagnosticReport {
             "GitHub App webhook secret",
             "register the GitHub App with spire auth login github",
         ),
-    ])
+    ]
+}
+
+fn service_probe_finding(
+    code: &str,
+    probe: spire_application::ServiceAuthenticationProbe,
+) -> DiagnosticFinding {
+    DiagnosticFinding::required_authentication(
+        code,
+        probe.state,
+        format!(
+            "{} authentication{}; permissions=[{}]; missing=[{}]; confidence={:?}",
+            probe.service,
+            probe
+                .identity
+                .as_deref()
+                .map(|identity| format!(" ({identity})"))
+                .unwrap_or_default(),
+            probe.permissions.join(","),
+            probe.missing_permissions.join(","),
+            probe.confidence
+        ),
+        probe.remediation,
+    )
+}
+
+fn github_token_provider(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+) -> Result<GitHubAppTokenProvider<GitHubAppHttpApi, SystemClock>> {
+    let installation_id = config
+        .config
+        .github
+        .installation_id
+        .parse::<u64>()
+        .context("github.installation_id must be the numeric GitHub App installation ID")?;
+    let (app_id, private_key) = match paths.profile {
+        InstallationProfile::User => {
+            let metadata =
+                UserAuthenticationMetadataStore::below_config_root(&paths.config_root).load()?;
+            let github = metadata
+                .github
+                .context("GitHub App metadata is missing; run spire auth login github")?;
+            let private_key = UserSecretStore::below_config_root(&paths.config_root)
+                .read_for_service(ManagedSecret::GitHubAppPrivateKey)?
+                .as_str()
+                .to_owned();
+            (github.app_id, private_key)
+        }
+        InstallationProfile::System => {
+            let app_id = config
+                .config
+                .github
+                .app_id
+                .context("system-profile GitHub authentication requires github.app_id")?;
+            let reference =
+                config.config.github.credential_ref.as_deref().context(
+                    "system-profile GitHub authentication requires github.credential_ref",
+                )?;
+            (app_id, load_credential(reference)?)
+        }
+    };
+    GitHubAppTokenProvider::new(
+        GitHubAppHttpApi::new(Duration::from_secs(
+            config.config.github.request_timeout_seconds,
+        ))?,
+        SystemClock,
+        app_id,
+        installation_id,
+        private_key,
+        approved_installation_permissions(false),
+    )
+    .map_err(Into::into)
+}
+
+async fn github_service_probe(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+) -> Result<spire_application::ServiceAuthenticationProbe> {
+    GitHubAppServiceProbe::new(
+        github_token_provider(config, paths)?,
+        approved_installation_permissions(false),
+    )
+    .probe_service("github")
+    .await
+    .map_err(Into::into)
+}
+
+fn effort_name(effort: Effort) -> &'static str {
+    match effort {
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+    }
 }
 
 fn print_diagnostic_report(report: &DiagnosticReport, format: OutputFormat) -> Result<()> {
@@ -1183,7 +2378,7 @@ fn dispatch_dry_run(config: ValidatedConfig, maker_harness: Option<String>) -> R
     Ok(())
 }
 
-async fn serve(config: ValidatedConfig) -> Result<()> {
+async fn serve(config: ValidatedConfig, paths: spire_application::ResolvedPaths) -> Result<()> {
     let signing_secret = load_credential(&config.config.webhook.signing_secret_ref)
         .context("failed to load Linear webhook signing secret")?;
     let database = SqliteDatabase::initialize(
@@ -1199,15 +2394,26 @@ async fn serve(config: ValidatedConfig) -> Result<()> {
         limits: config.webhook_limits(),
         signing_secret: Arc::from(signing_secret.into_bytes()),
     };
+    let github_webhook_secret = match paths.profile {
+        InstallationProfile::User => UserSecretStore::below_config_root(&paths.config_root)
+            .read_for_service(ManagedSecret::GitHubWebhookSecret)?
+            .as_str()
+            .as_bytes()
+            .to_vec(),
+        InstallationProfile::System => {
+            let reference = config.config.github.webhook_secret_ref.as_deref().context(
+                "system-profile GitHub authentication requires github.webhook_secret_ref",
+            )?;
+            load_credential(reference)
+                .context("failed to load GitHub webhook signing secret")?
+                .into_bytes()
+        }
+    };
     let readiness = Readiness {
         configuration_valid: true,
         database: Some(database.clone()),
-        github: Some(github_adapter(&config)?),
-        github_webhook_secret: Some(
-            load_credential(&config.config.github.webhook_secret_ref)
-                .context("failed to load GitHub webhook signing secret")?
-                .into_bytes(),
-        ),
+        github: Some(github_adapter(&config, &paths).await?),
+        github_webhook_secret: Some(github_webhook_secret),
         github_repositories: config
             .config
             .github
@@ -1216,7 +2422,8 @@ async fn serve(config: ValidatedConfig) -> Result<()> {
             .map(|entry| entry.repository.clone())
             .collect(),
     };
-    spawn_github_reconciliation(database, readiness.github.clone());
+    spawn_github_reconciliation(database.clone(), readiness.github.clone());
+    spawn_project_mapping_reconciliation(config.clone(), paths.clone(), database.clone());
     let api = TcpListener::bind(config.config.server.api_bind)
         .await
         .context("failed to bind API listener")?;
@@ -1257,6 +2464,28 @@ fn spawn_github_reconciliation(database: SqliteDatabase, github: Option<GitHubHt
                 .await
             {
                 tracing::warn!(error = %error, "GitHub active-PR reconciliation failed");
+            }
+        }
+    });
+}
+
+fn spawn_project_mapping_reconciliation(
+    config: ValidatedConfig,
+    paths: spire_application::ResolvedPaths,
+    database: SqliteDatabase,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        let mut offset = 0;
+        loop {
+            ticker.tick().await;
+            match reconcile_project_mappings(&config, &paths, &database, offset).await {
+                Ok(report) => {
+                    offset = report["next_offset"].as_u64().unwrap_or_default() as usize;
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "project mapping reconciliation failed");
+                }
             }
         }
     });
@@ -1530,7 +2759,7 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use tower::ServiceExt;
 
     #[tokio::test]
@@ -1576,6 +2805,26 @@ mod tests {
     }
 
     #[test]
+    fn mapping_reconciliation_recovers_after_transient_failures() {
+        assert_eq!(
+            reconciled_mapping_health(false, true),
+            MappingRepositoryHealth::Stale
+        );
+        assert_eq!(
+            reconciled_mapping_health(false, false),
+            MappingRepositoryHealth::Healthy
+        );
+        assert_eq!(
+            reconciled_mapping_health(true, false),
+            MappingRepositoryHealth::Unhealthy
+        );
+        assert_eq!(
+            reconciled_mapping_health(true, true),
+            MappingRepositoryHealth::Unhealthy
+        );
+    }
+
+    #[test]
     fn protected_file_input_requires_user_only_permissions() {
         let root = std::env::temp_dir().join(format!("spire-cli-secret-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -1590,6 +2839,15 @@ mod tests {
         assert!(!format!("{credential:?}").contains("SPIRE_SECRET_SENTINEL"));
         fs::set_permissions(&credential_file, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(read_protected_secret_file(&credential_file).is_err());
+        fs::set_permissions(&credential_file, fs::Permissions::from_mode(0o600)).unwrap();
+        let credential_link = root.join("linear-key-link");
+        symlink(&credential_file, &credential_link).unwrap();
+        assert!(read_protected_secret_file(&credential_link).is_err());
+
+        let oversized = root.join("oversized-key");
+        fs::write(&oversized, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(read_protected_secret_file(&oversized).is_err());
         let _ = fs::remove_dir_all(root);
     }
 }

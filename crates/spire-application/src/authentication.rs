@@ -62,6 +62,43 @@ impl DiagnosticFinding {
             remediation,
         }
     }
+
+    pub fn required_authentication(
+        code: impl Into<String>,
+        state: AuthenticationState,
+        summary: impl Into<String>,
+        remediation: Option<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            required: true,
+            state,
+            severity: if state == AuthenticationState::Authenticated {
+                DiagnosticSeverity::Info
+            } else {
+                DiagnosticSeverity::Error
+            },
+            summary: summary.into(),
+            remediation,
+        }
+    }
+
+    pub fn optional(
+        code: impl Into<String>,
+        state: AuthenticationState,
+        severity: DiagnosticSeverity,
+        summary: impl Into<String>,
+        remediation: Option<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            required: false,
+            state,
+            severity,
+            summary: summary.into(),
+            remediation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -77,9 +114,66 @@ impl DiagnosticReport {
         let ready = findings
             .iter()
             .filter(|finding| finding.required)
-            .all(|finding| finding.state.is_ready());
+            .all(|finding| finding.severity != DiagnosticSeverity::Error);
         Self { ready, findings }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeConfidence {
+    Confirmed,
+    Inferred,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServiceAuthenticationProbe {
+    pub service: String,
+    pub state: AuthenticationState,
+    pub identity: Option<String>,
+    pub expires_at: Option<String>,
+    pub permissions: Vec<String>,
+    pub missing_permissions: Vec<String>,
+    pub confidence: ProbeConfidence,
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HarnessProbe {
+    pub harness: String,
+    pub executable: String,
+    pub version: Option<String>,
+    pub state: AuthenticationState,
+    pub supported_models: Vec<String>,
+    pub supported_efforts: Vec<String>,
+    pub confidence: ProbeConfidence,
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GitTransportProbe {
+    pub repository_path: String,
+    pub remote_name: Option<String>,
+    pub remote_url: Option<String>,
+    pub canonical_repository: Option<String>,
+    pub default_branch: Option<String>,
+    pub fetch_state: AuthenticationState,
+    pub push_state: AuthenticationState,
+    pub ephemeral_agent_risk: bool,
+    pub confidence: ProbeConfidence,
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServiceContextProbe {
+    pub unit_installed: bool,
+    pub unit_active: bool,
+    pub lingering_enabled: bool,
+    pub runtime_user: String,
+    pub ssh_agent_available: bool,
+    pub state: AuthenticationState,
+    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +181,28 @@ pub enum ManagedSecret {
     LinearApiKey,
     GitHubAppPrivateKey,
     GitHubWebhookSecret,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct AuthenticationMetadata {
+    pub linear: Option<LinearAuthenticationMetadata>,
+    pub github: Option<GitHubAuthenticationMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct LinearAuthenticationMetadata {
+    pub viewer_id: String,
+    pub organization_id: String,
+    pub verified_at_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct GitHubAuthenticationMetadata {
+    pub app_id: u64,
+    pub app_slug: String,
+    pub client_id: String,
+    pub html_url: String,
+    pub verified_at_unix: u64,
 }
 
 impl ManagedSecret {
@@ -107,6 +223,19 @@ pub trait SecretStorePort {
     fn status(&self, secret: ManagedSecret) -> Result<AuthenticationState, Self::Error>;
     fn replace(&self, secret: ManagedSecret, value: SecretInput) -> Result<(), Self::Error>;
     fn remove(&self, secret: ManagedSecret) -> Result<(), Self::Error>;
+}
+
+pub trait AuthenticationMetadataStorePort {
+    type Error;
+
+    fn load(&self) -> Result<AuthenticationMetadata, Self::Error>;
+    fn store(&self, metadata: &AuthenticationMetadata) -> Result<(), Self::Error>;
+}
+
+pub trait SecretPromptPort {
+    type Error;
+
+    fn prompt_secret(&self, prompt: &str) -> Result<SecretInput, Self::Error>;
 }
 
 /// A write-only secret input. Its `Debug` implementation is intentionally
@@ -134,28 +263,30 @@ impl std::fmt::Debug for SecretInput {
     }
 }
 
+#[allow(async_fn_in_trait)]
 pub trait ServiceAuthenticationProbePort {
     type Error;
 
-    fn probe_service(&self, service: &str) -> Result<DiagnosticFinding, Self::Error>;
+    async fn probe_service(&self, service: &str)
+    -> Result<ServiceAuthenticationProbe, Self::Error>;
 }
 
 pub trait HarnessProbePort {
     type Error;
 
-    fn probe_harness(&self, harness: &str) -> Result<DiagnosticFinding, Self::Error>;
+    fn probe_harness(&self, harness: &str) -> Result<HarnessProbe, Self::Error>;
 }
 
 pub trait GitTransportProbePort {
     type Error;
 
-    fn probe_git_transport(&self) -> Result<DiagnosticFinding, Self::Error>;
+    fn probe_git_transport(&self) -> Result<GitTransportProbe, Self::Error>;
 }
 
 pub trait ServiceContextProbePort {
     type Error;
 
-    fn probe_service_context(&self) -> Result<DiagnosticFinding, Self::Error>;
+    fn probe_service_context(&self) -> Result<ServiceContextProbe, Self::Error>;
 }
 
 #[cfg(test)]
@@ -197,6 +328,18 @@ mod tests {
     }
 
     #[test]
+    fn configured_secret_is_not_authenticated_service_evidence() {
+        let report =
+            DiagnosticReport::from_findings(vec![DiagnosticFinding::required_authentication(
+                "SPIRE-AUTH-003",
+                AuthenticationState::Configured,
+                "credential exists but has not been verified",
+                None,
+            )]);
+        assert!(!report.ready);
+    }
+
+    #[test]
     fn secret_input_debug_is_redacted() {
         let secret = SecretInput::new("SPIRE_SECRET_SENTINEL".into());
         assert!(!format!("{secret:?}").contains("SPIRE_SECRET_SENTINEL"));
@@ -212,5 +355,51 @@ mod tests {
             ManagedSecret::GitHubWebhookSecret.key(),
             "GITHUB_WEBHOOK_SECRET"
         );
+    }
+
+    #[test]
+    fn diagnostic_json_golden_reports_cover_ready_degraded_and_blocked() {
+        let cases = [
+            (
+                DiagnosticReport::from_findings(vec![DiagnosticFinding::required(
+                    "SPIRE-DB-001",
+                    AuthenticationState::Authenticated,
+                    "database integrity is valid",
+                    None,
+                )]),
+                r#"{"ready":true,"findings":[{"code":"SPIRE-DB-001","required":true,"state":"authenticated","severity":"info","summary":"database integrity is valid","remediation":null}]}"#,
+            ),
+            (
+                DiagnosticReport::from_findings(vec![
+                    DiagnosticFinding::required(
+                        "SPIRE-DB-001",
+                        AuthenticationState::Authenticated,
+                        "database integrity is valid",
+                        None,
+                    ),
+                    DiagnosticFinding::optional(
+                        "SPIRE-GIT-002",
+                        AuthenticationState::Ambiguous,
+                        DiagnosticSeverity::Warning,
+                        "push authority is unverified",
+                        Some("verify push authority before enabling writes".into()),
+                    ),
+                ]),
+                r#"{"ready":true,"findings":[{"code":"SPIRE-DB-001","required":true,"state":"authenticated","severity":"info","summary":"database integrity is valid","remediation":null},{"code":"SPIRE-GIT-002","required":false,"state":"ambiguous","severity":"warning","summary":"push authority is unverified","remediation":"verify push authority before enabling writes"}]}"#,
+            ),
+            (
+                DiagnosticReport::from_findings(vec![DiagnosticFinding::required(
+                    "SPIRE-SVC-001",
+                    AuthenticationState::Ambiguous,
+                    "service context is ambiguous",
+                    Some("run spire doctor from the user service context".into()),
+                )]),
+                r#"{"ready":false,"findings":[{"code":"SPIRE-SVC-001","required":true,"state":"ambiguous","severity":"error","summary":"service context is ambiguous","remediation":"run spire doctor from the user service context"}]}"#,
+            ),
+        ];
+
+        for (report, expected) in cases {
+            assert_eq!(serde_json::to_string(&report).unwrap(), expected);
+        }
     }
 }

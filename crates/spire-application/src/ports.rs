@@ -1,9 +1,8 @@
 use std::time::SystemTime;
 
 use crate::{CanonicalLinearIssue, CanonicalPullRequest, CheckRun};
-use spire_domain::{
-    CommitSha, LinearIssueId, ProviderCapacity, RepositoryName, RunId, WorkItemId, WorkspaceId,
-};
+use serde::{Deserialize, Serialize};
+use spire_domain::{CommitSha, LinearIssueId, ProviderCapacity, RepositoryName, RunId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExternalResult<T> {
@@ -196,42 +195,90 @@ pub struct NormalizedResult {
     pub outcome: String,
 }
 
-pub trait WorkspacePort {
-    type Error;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceKind {
+    Maker,
+    Reviewer,
+}
 
-    fn allocate(
-        &self,
-        work_item_id: WorkItemId,
-        run_id: RunId,
-    ) -> Result<ExternalResult<Workspace>, Self::Error>;
-    fn cleanup(
-        &self,
-        workspace_id: WorkspaceId,
-        idempotency_key: &IdempotencyKey,
-    ) -> Result<ExternalResult<()>, Self::Error>;
-    fn inspect(
-        &self,
-        workspace_id: WorkspaceId,
-    ) -> Result<ExternalResult<WorkspaceStatus>, Self::Error>;
-    fn quarantine(
-        &self,
-        workspace_id: WorkspaceId,
-        reason: &str,
-        idempotency_key: &IdempotencyKey,
-    ) -> Result<ExternalResult<()>, Self::Error>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAllocationState {
+    Allocating,
+    Ready,
+    Quarantined,
+    Removing,
+    Removed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Workspace {
-    pub id: WorkspaceId,
-    pub repository: RepositoryName,
+pub struct MakerWorkspaceRequest {
+    pub workspace_id: String,
+    pub work_item_id: String,
+    pub linear_identifier: String,
+    pub root_run_id: String,
+    pub repository_source_path: String,
+    pub git_common_directory: String,
+    pub base_sha: String,
+    pub workspace_root: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorkspaceStatus {
-    Allocated,
-    Missing,
-    Quarantined,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewerWorkspaceRequest {
+    pub workspace_id: String,
+    pub work_item_id: String,
+    pub run_id: String,
+    pub review_cycle_id: String,
+    pub repository_source_path: String,
+    pub git_common_directory: String,
+    pub base_sha: String,
+    pub head_sha: String,
+    pub workspace_root: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceRecord {
+    pub id: String,
+    pub work_item_id: String,
+    pub run_id: Option<String>,
+    pub kind: WorkspaceKind,
+    pub root_run_id: Option<String>,
+    pub review_cycle_id: Option<String>,
+    pub path: String,
+    pub workspace_root: String,
+    pub repository_source_path: String,
+    pub git_common_directory: String,
+    pub base_sha: String,
+    pub head_sha: Option<String>,
+    pub branch: Option<String>,
+    pub allocation_state: WorkspaceAllocationState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WorkspaceRecoverySummary {
+    pub adopted: u64,
+    pub quarantined: u64,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait WorkspacePort {
+    type Error;
+
+    async fn allocate_maker(
+        &self,
+        request: MakerWorkspaceRequest,
+    ) -> Result<ExternalResult<WorkspaceRecord>, Self::Error>;
+    async fn allocate_reviewer(
+        &self,
+        request: ReviewerWorkspaceRequest,
+    ) -> Result<ExternalResult<WorkspaceRecord>, Self::Error>;
+    async fn verify_reviewer_clean(
+        &self,
+        workspace_id: &str,
+    ) -> Result<ExternalResult<bool>, Self::Error>;
+    async fn recover_allocations(&self) -> Result<WorkspaceRecoverySummary, Self::Error>;
+    async fn cleanup(&self, workspace_id: &str) -> Result<ExternalResult<()>, Self::Error>;
 }
 
 pub trait ClockPort {

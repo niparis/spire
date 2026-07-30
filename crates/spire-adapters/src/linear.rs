@@ -12,9 +12,12 @@ use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use spire_application::{
-    CanonicalIssuePage, CanonicalLinearIssue, ExternalResult, LinearReadPort, RelevantIssueQuery,
+    AuthenticationState, CanonicalIssuePage, CanonicalLinearIssue, CanonicalLinearProject,
+    CanonicalLinearProjectPage, ExternalResult, LinearProjectQuery, LinearProjectReadPort,
+    LinearReadPort, ProbeConfidence, RelevantIssueQuery, ServiceAuthenticationProbe,
+    ServiceAuthenticationProbePort,
 };
-use spire_domain::LinearIssueId;
+use spire_domain::{LinearIssueId, LinearProjectId};
 use thiserror::Error;
 use tracing::debug;
 
@@ -183,6 +186,43 @@ impl LinearReadAdapter {
         parse_page(data.pointer("/data/issues").cloned().unwrap_or(Value::Null))
     }
 
+    async fn project(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<CanonicalLinearProject>, LinearAdapterError> {
+        let data = self
+            .request(PROJECT_QUERY, json!({"id": project_id}))
+            .await?;
+        reject_graphql_errors(&data)?;
+        normalize_project_fixture(
+            data.pointer("/data/project")
+                .cloned()
+                .unwrap_or(Value::Null),
+        )
+    }
+
+    async fn projects(
+        &self,
+        query: &LinearProjectQuery,
+    ) -> Result<CanonicalLinearProjectPage, LinearAdapterError> {
+        let data = self
+            .request(
+                PROJECTS_QUERY,
+                json!({
+                    "first": PAGE_SIZE,
+                    "after": query.cursor,
+                    "includeArchived": query.include_archived
+                }),
+            )
+            .await?;
+        reject_graphql_errors(&data)?;
+        parse_project_page(
+            data.pointer("/data/projects")
+                .cloned()
+                .unwrap_or(Value::Null),
+        )
+    }
+
     /// Verifies the current API key using the non-mutating `viewer` query.
     pub async fn verify_viewer(&self) -> Result<LinearViewerIdentity, LinearAdapterError> {
         normalize_viewer_probe(self.request(VIEWER_QUERY, json!({})).await?)
@@ -207,6 +247,91 @@ impl LinearReadPort for LinearReadAdapter {
         query: &RelevantIssueQuery,
     ) -> Result<ExternalResult<CanonicalIssuePage>, Self::Error> {
         Ok(ExternalResult::Confirmed(self.issues(query).await?))
+    }
+}
+
+impl LinearProjectReadPort for LinearReadAdapter {
+    type Error = LinearAdapterError;
+
+    async fn get_project(
+        &self,
+        id: &LinearProjectId,
+    ) -> Result<ExternalResult<CanonicalLinearProject>, Self::Error> {
+        Ok(match self.project(id.as_str()).await? {
+            Some(project) => ExternalResult::Confirmed(project),
+            None => ExternalResult::NotFound,
+        })
+    }
+
+    async fn list_projects(
+        &self,
+        query: &LinearProjectQuery,
+    ) -> Result<ExternalResult<CanonicalLinearProjectPage>, Self::Error> {
+        Ok(ExternalResult::Confirmed(self.projects(query).await?))
+    }
+}
+
+#[allow(async_fn_in_trait)]
+impl ServiceAuthenticationProbePort for LinearReadAdapter {
+    type Error = LinearAdapterError;
+
+    async fn probe_service(
+        &self,
+        service: &str,
+    ) -> Result<ServiceAuthenticationProbe, Self::Error> {
+        let (state, identity, confidence, remediation) = match self.verify_viewer().await {
+            Ok(identity) => (
+                AuthenticationState::Authenticated,
+                Some(format!(
+                    "viewer:{} organization:{}",
+                    identity.viewer_id, identity.organization_id
+                )),
+                ProbeConfidence::Confirmed,
+                None,
+            ),
+            Err(LinearAdapterError::Authentication) => (
+                AuthenticationState::Expired,
+                None,
+                ProbeConfidence::Confirmed,
+                Some("run spire auth rotate linear".into()),
+            ),
+            Err(LinearAdapterError::PermissionDenied) => (
+                AuthenticationState::PermissionDenied,
+                None,
+                ProbeConfidence::Confirmed,
+                Some("replace the Linear API key with one authorized for the configured workspace".into()),
+            ),
+            Err(LinearAdapterError::RateLimited { .. } | LinearAdapterError::Network) => (
+                AuthenticationState::Unavailable,
+                None,
+                ProbeConfidence::Inferred,
+                Some("retry the Linear authentication probe after provider recovery".into()),
+            ),
+            Err(
+                LinearAdapterError::AmbiguousAuthentication
+                | LinearAdapterError::MalformedResponse
+                | LinearAdapterError::ResponseTooLarge
+                | LinearAdapterError::Http(_)
+                | LinearAdapterError::ClientConstruction
+                | LinearAdapterError::CredentialUnavailable
+                | LinearAdapterError::InvalidCredentialReference,
+            ) => (
+                AuthenticationState::Ambiguous,
+                None,
+                ProbeConfidence::Unknown,
+                Some("update the captured Linear authentication fixture before trusting this response".into()),
+            ),
+        };
+        Ok(ServiceAuthenticationProbe {
+            service: service.into(),
+            state,
+            identity,
+            expires_at: None,
+            permissions: Vec::new(),
+            missing_permissions: Vec::new(),
+            confidence,
+            remediation,
+        })
     }
 }
 
@@ -235,6 +360,7 @@ struct RawIssue {
     identifier: String,
     team: RawId,
     state: RawId,
+    project: Option<RawProject>,
     estimate: Option<u8>,
     priority: Option<u8>,
     labels: RawConnection<RawName>,
@@ -252,6 +378,13 @@ struct RawId {
 #[derive(Deserialize)]
 struct RawName {
     name: String,
+}
+#[derive(Deserialize)]
+struct RawProject {
+    id: String,
+    name: String,
+    #[serde(rename = "archivedAt")]
+    archived_at: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -290,17 +423,30 @@ pub fn normalize_issue_fixture(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let description = raw.description;
+    let project_id = raw
+        .project
+        .as_ref()
+        .map(|project| LinearProjectId::new(project.id.clone()))
+        .transpose()
+        .map_err(|_| LinearAdapterError::MalformedResponse)?;
+    let project_name_snapshot = raw.project.map(|project| project.name);
     let acceptance_criteria = description
         .as_deref()
         .filter(|text| text.to_ascii_lowercase().contains("acceptance criteria"))
         .map(str::to_owned);
-    let revision =
-        CanonicalLinearIssue::revision(&raw.updated_at, description.as_deref().unwrap_or(""));
+    let revision = CanonicalLinearIssue::revision(
+        &raw.updated_at,
+        description.as_deref().unwrap_or(""),
+        project_id.as_ref(),
+        project_name_snapshot.as_deref(),
+    );
     Ok(Some(CanonicalLinearIssue {
         id: LinearIssueId::new(raw.id).map_err(|_| LinearAdapterError::MalformedResponse)?,
         identifier: raw.identifier,
         team_id: raw.team.id,
         workflow_state_id: raw.state.id,
+        project_id,
+        project_name_snapshot,
         estimate: raw.estimate,
         priority: raw.priority,
         labels: raw
@@ -318,6 +464,49 @@ pub fn normalize_issue_fixture(
         updated_at: raw.updated_at,
         revision,
     }))
+}
+
+pub fn normalize_project_fixture(
+    value: Value,
+) -> Result<Option<CanonicalLinearProject>, LinearAdapterError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let raw: RawProject =
+        serde_json::from_value(value).map_err(|_| LinearAdapterError::MalformedResponse)?;
+    if raw.name.trim().is_empty() || raw.name.len() > 256 {
+        return Err(LinearAdapterError::MalformedResponse);
+    }
+    Ok(Some(CanonicalLinearProject {
+        id: LinearProjectId::new(raw.id).map_err(|_| LinearAdapterError::MalformedResponse)?,
+        name: raw.name,
+        archived_at: raw.archived_at,
+    }))
+}
+
+fn parse_project_page(value: Value) -> Result<CanonicalLinearProjectPage, LinearAdapterError> {
+    let raw: RawConnection<Value> =
+        serde_json::from_value(value).map_err(|_| LinearAdapterError::MalformedResponse)?;
+    let projects = raw
+        .nodes
+        .into_iter()
+        .map(|value| normalize_project_fixture(value)?.ok_or(LinearAdapterError::MalformedResponse))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CanonicalLinearProjectPage {
+        projects,
+        next_cursor: raw
+            .page_info
+            .has_next_page
+            .then_some(raw.page_info.end_cursor)
+            .flatten(),
+    })
+}
+
+fn reject_graphql_errors(value: &Value) -> Result<(), LinearAdapterError> {
+    if let Some(errors) = value.get("errors").and_then(Value::as_array) {
+        return Err(classify_viewer_errors(errors));
+    }
+    Ok(())
 }
 
 /// Converts a captured `viewer` response into non-secret identity evidence.
@@ -395,8 +584,11 @@ fn parse_page(value: Value) -> Result<CanonicalIssuePage, LinearAdapterError> {
     })
 }
 
-const ISSUE_QUERY: &str = "query Issue($id: String!) { issue(id: $id) { id identifier team { id } state { id } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } }";
-const ISSUES_QUERY: &str = "query Issues($first: Int!, $after: String, $filter: IssueFilter) { issues(first: $first, after: $after, filter: $filter) { nodes { id identifier team { id } state { id } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } pageInfo { hasNextPage endCursor } } }";
+const ISSUE_QUERY: &str = "query Issue($id: String!) { issue(id: $id) { id identifier team { id } state { id } project { id name } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } }";
+const ISSUES_QUERY: &str = "query Issues($first: Int!, $after: String, $filter: IssueFilter) { issues(first: $first, after: $after, filter: $filter) { nodes { id identifier team { id } state { id } project { id name } estimate priority labels { nodes { name } pageInfo { hasNextPage endCursor } } relations { nodes { relatedIssue { id } issue { id } } pageInfo { hasNextPage endCursor } } description assignee { id } creator { id } createdAt updatedAt } pageInfo { hasNextPage endCursor } } }";
+const PROJECT_QUERY: &str =
+    "query Project($id: String!) { project(id: $id) { id name archivedAt } }";
+const PROJECTS_QUERY: &str = "query Projects($first: Int!, $after: String, $includeArchived: Boolean!) { projects(first: $first, after: $after, includeArchived: $includeArchived) { nodes { id name archivedAt } pageInfo { hasNextPage endCursor } } }";
 const VIEWER_QUERY: &str = "query Viewer { viewer { id organization { id } } }";
 
 #[cfg(test)]
@@ -404,10 +596,36 @@ mod tests {
     use super::*;
     #[test]
     fn normalizes_optional_values_and_hashes_untrusted_description() {
-        let issue = normalize_issue_fixture(serde_json::json!({"id":"issue-1","identifier":"SPI-1","team":{"id":"team"},"state":{"id":"ready"},"estimate":null,"priority":null,"labels":{"nodes":[{"name":"type:bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}},"relations":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}},"description":"untrusted instruction","assignee":null,"creator":null,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"})).unwrap().unwrap();
+        let issue = normalize_issue_fixture(serde_json::json!({"id":"issue-1","identifier":"SPI-1","team":{"id":"team"},"state":{"id":"ready"},"project":{"id":"project-1","name":"Project"},"estimate":null,"priority":null,"labels":{"nodes":[{"name":"type:bug"}],"pageInfo":{"hasNextPage":false,"endCursor":null}},"relations":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":null}},"description":"untrusted instruction","assignee":null,"creator":null,"createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-02T00:00:00Z"})).unwrap().unwrap();
         assert_eq!(issue.estimate, None);
         assert_eq!(issue.assignee_id, None);
         assert_ne!(issue.revision, issue.updated_at);
+        assert_eq!(issue.project_id.unwrap().as_str(), "project-1");
+    }
+
+    #[test]
+    fn project_fixtures_distinguish_rename_archive_missing_and_malformed() {
+        let original = normalize_project_fixture(
+            serde_json::json!({"id":"project-1","name":"Original","archivedAt":null}),
+        )
+        .unwrap()
+        .unwrap();
+        let renamed = normalize_project_fixture(
+            serde_json::json!({"id":"project-1","name":"Renamed","archivedAt":null}),
+        )
+        .unwrap()
+        .unwrap();
+        let archived = normalize_project_fixture(
+            serde_json::json!({"id":"project-1","name":"Renamed","archivedAt":"2026-07-01T00:00:00Z"}),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(original.id, renamed.id);
+        assert_ne!(original.name, renamed.name);
+        assert!(archived.is_archived());
+        assert_eq!(normalize_project_fixture(Value::Null).unwrap(), None);
+        assert!(normalize_project_fixture(serde_json::json!({"id":"","name":""})).is_err());
     }
 
     #[test]

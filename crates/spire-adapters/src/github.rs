@@ -8,8 +8,8 @@ use reqwest::{
 };
 use serde::Deserialize;
 use spire_application::{
-    CanonicalPullRequest, CheckRun, CheckStatus, ExternalResult, GitHubPort, IdempotencyKey,
-    MergeState, PullRequestState,
+    CanonicalPullRequest, CanonicalRepositoryIdentity, CheckRun, CheckStatus, ExternalResult,
+    GitHubPort, IdempotencyKey, MergeState, PullRequestState, RepositoryIdentityPort,
 };
 use spire_domain::{CommitSha, RepositoryName};
 use thiserror::Error;
@@ -33,9 +33,42 @@ pub enum GitHubAdapterError {
     InvalidResponse(String),
 }
 
-/// A credential must already be an installation access token. Minting a GitHub
-/// App token belongs to the approved secret-delivery boundary (for example a
-/// systemd credential refresher), not to request handling.
+#[derive(Debug, Deserialize)]
+struct RepositoryIdentityResponse {
+    full_name: String,
+    default_branch: String,
+    archived: bool,
+}
+
+impl RepositoryIdentityPort for GitHubHttpAdapter {
+    type Error = GitHubAdapterError;
+
+    async fn get_repository_identity(
+        &self,
+        repository: &RepositoryName,
+    ) -> Result<ExternalResult<CanonicalRepositoryIdentity>, Self::Error> {
+        self.check_repository(repository)?;
+        let path = format!("/repos/{repository}");
+        let Some(response) = self
+            .response(self.request(reqwest::Method::GET, &path).send().await?)
+            .await?
+        else {
+            return Ok(ExternalResult::NotFound);
+        };
+        let identity = response.json::<RepositoryIdentityResponse>().await?;
+        let canonical = RepositoryName::new(identity.full_name)
+            .map_err(|error| GitHubAdapterError::InvalidResponse(error.to_string()))?;
+        Ok(ExternalResult::Confirmed(CanonicalRepositoryIdentity {
+            repository: canonical,
+            default_branch: identity.default_branch,
+            archived: identity.archived,
+        }))
+    }
+}
+
+/// Receives one short-lived installation token minted by `github_app`.
+/// The token remains in memory and is replaced by reconstructing this adapter
+/// after the provider refreshes it; it is never durable configuration.
 #[derive(Clone)]
 pub struct GitHubHttpAdapter {
     client: Client,

@@ -1873,6 +1873,9 @@ high-level roadmap.
 | P0 | Harness capacity signal mapping | Codex and Claude outputs must distinguish context, quota, rate, auth, model, and task failures |
 | P0 | Mid-run same-harness continuation | We must prove how each harness resumes from a fresh context on a preserved worktree |
 | P0 | Cloudflare tunnel hostname and access policy | Linear requires stable public HTTPS while admin APIs must remain private |
+| P0 | GitHub App versus bot token | Determines webhook installation, check publishing, and repository permissions |
+| P0 | Who commits and pushes: harness or mechanical publisher | Defines the most important credential boundary |
+| P0 | Target-VM Git worktree proof | The Git-aware allocation, detached review, restart reconciliation, and cleanup adapter has deterministic local coverage but still needs target-VM evidence |
 | P0 | Who commits and pushes: harness or mechanical publisher | Defines the most important credential boundary, and the App's `contents` permission |
 | P0 | Git worktree allocation/recovery proof | The accepted worktree-first contract still needs Git-aware allocation, detached review, restart reconciliation, and cleanup evidence |
 | P0 | Exact Linear readiness contract | A status alone may not prove specification quality or repository routing |
@@ -1897,10 +1900,11 @@ high-level roadmap.
 
 ## Testing
 
-**Test files:** Unit and adapter tests exist in the Cargo workspace; Git worktree
-integration fixtures remain to be added.
-**Coverage:** Core policy and SQLite contracts have automated coverage. The
-worktree-first Git lifecycle is not implemented or proven on the target VM.
+**Test files:** Unit and adapter tests exist in the Cargo workspace, including
+temporary real-Git worktree fixtures.
+**Coverage:** Core policy, SQLite contracts, maker/reviewer isolation, allocation
+crash recovery, reviewer mutation detection, and cleanup recovery have automated
+coverage. The worktree lifecycle is not yet proven on the target VM.
 **Run:** `cargo test --workspace` is the canonical project-level command.
 
 ### Domain tests
@@ -2111,9 +2115,9 @@ duplicate implementation or same-provider review.
   reset timestamps have not been captured.
 - **Harness runner:** systemd transient units are recommended but not proven with
   both Claude Code and Codex.
-- **Worktree execution:** The current allocator is directory-only; Git worktree
-  allocation, detached review worktrees, and crash reconciliation remain to be
-  implemented and proven on the target VM.
+- **Worktree execution:** Git-aware maker allocation, detached review worktrees,
+  crash reconciliation, and fail-closed cleanup are implemented with deterministic
+  local fixtures; target-VM Git and linked-worktree behavior remains unverified.
 - **Heartbeat:** It is unverified whether each chosen harness surface exposes enough state for the proposed heartbeat and recovery model.
 - **Publication:** It is undecided whether a harness pushes directly or a separate publisher applies its patch.
 - **Specification readiness:** The exact required Linear fields and repository mapping are undecided.

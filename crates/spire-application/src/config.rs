@@ -50,15 +50,21 @@ pub struct LinearConfig {
     pub credential_ref: Option<String>,
     pub complexity_mapping: BTreeMap<ComplexityEstimate, ComplexityClass>,
     pub supported_type_labels: Vec<String>,
+    /// Schema 3 transition input only. New routing never consults these labels.
+    #[serde(default)]
     pub repository_mappings: Vec<RepositoryMapping>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubConfig {
+    #[serde(default)]
+    pub app_id: Option<u64>,
     pub installation_id: String,
-    pub credential_ref: String,
-    pub webhook_secret_ref: String,
+    #[serde(default)]
+    pub credential_ref: Option<String>,
+    #[serde(default)]
+    pub webhook_secret_ref: Option<String>,
     pub request_timeout_seconds: u64,
     pub repositories: Vec<GitHubRepositoryConfig>,
 }
@@ -403,19 +409,16 @@ impl Config {
         if let Some(reference) = self.linear.credential_ref.as_deref() {
             ensure_credential_reference("linear.credential_ref", reference)?;
         }
-        for (path, reference) in [
-            ("github.credential_ref", self.github.credential_ref.as_str()),
-            (
-                "webhook.signing_secret_ref",
-                self.webhook.signing_secret_ref.as_str(),
-            ),
-            (
-                "github.webhook_secret_ref",
-                self.github.webhook_secret_ref.as_str(),
-            ),
-        ] {
-            ensure_credential_reference(path, reference)?;
+        if let Some(reference) = self.github.credential_ref.as_deref() {
+            ensure_credential_reference("github.credential_ref", reference)?;
         }
+        if let Some(reference) = self.github.webhook_secret_ref.as_deref() {
+            ensure_credential_reference("github.webhook_secret_ref", reference)?;
+        }
+        ensure_credential_reference(
+            "webhook.signing_secret_ref",
+            self.webhook.signing_secret_ref.as_str(),
+        )?;
         validate_webhook(&self.webhook)?;
         if self.github.repositories.is_empty() {
             return Err(ConfigError::MissingValue {
@@ -464,11 +467,6 @@ impl Config {
                 path: "linear.supported_type_labels".to_owned(),
             });
         }
-        if self.linear.repository_mappings.is_empty() {
-            return Err(ConfigError::MissingValue {
-                path: "linear.repository_mappings".to_owned(),
-            });
-        }
         for (path, value) in [
             (
                 "concurrency.total_active_harness_runs",
@@ -506,7 +504,7 @@ impl Config {
                         .to_owned(),
             });
         }
-        validate_rollout(&self.rollout, &self.linear, &self.concurrency)?;
+        validate_rollout(&self.rollout, &self.linear, &self.github, &self.concurrency)?;
         if self.security.reviewer_can_push {
             return Err(ConfigError::ReviewerCanPush);
         }
@@ -695,6 +693,7 @@ fn validate_webhook(webhook: &WebhookConfig) -> Result<(), ConfigError> {
 fn validate_rollout(
     rollout: &RolloutConfig,
     linear: &LinearConfig,
+    github: &GitHubConfig,
     concurrency: &ConcurrencyConfig,
 ) -> Result<(), ConfigError> {
     if rollout.max_active_harness_runs == 0 {
@@ -733,14 +732,14 @@ fn validate_rollout(
         });
     }
     for repository in &rollout.allowed_repositories {
-        if !linear
-            .repository_mappings
+        if !github
+            .repositories
             .iter()
-            .any(|mapping| mapping.repository.as_str() == repository.as_str() && mapping.enabled)
+            .any(|configured| configured.repository == repository.as_str())
         {
             return Err(ConfigError::RolloutInconsistent {
                 path: "rollout.allowed_repositories".to_owned(),
-                detail: format!("{repository} is not an enabled linear.repository_mappings entry"),
+                detail: format!("{repository} is not a configured GitHub repository"),
             });
         }
     }
@@ -864,7 +863,7 @@ github:
   webhook_secret_ref: env:GITHUB_WEBHOOK_SECRET
   request_timeout_seconds: 10
   repositories:
-    - {repository: owner/repository, base_branch: main, required_checks: [test], workspace_root: /var/lib/spire/workspaces/owner-repository}
+    - {repository: owner/spire, base_branch: main, required_checks: [test], workspace_root: /var/lib/spire/workspaces/owner-spire}
 cloudflare: {account_ref: account, zone_ref: zone, webhook_hostname: spire.example.test}
 harnesses:
   maker: {provider: codex, model: codex-model, effort: medium}
@@ -905,6 +904,14 @@ rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositori
     #[test]
     fn user_configuration_can_omit_the_managed_linear_credential_reference() {
         let input = VALID_CONFIG.replace("  credential_ref: env:LINEAR_TOKEN\n", "");
+        assert!(Config::from_yaml(&input).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn user_configuration_can_omit_managed_github_credential_references() {
+        let input = VALID_CONFIG
+            .replace("  credential_ref: systemd:credentials/github-key\n", "")
+            .replace("  webhook_secret_ref: env:GITHUB_WEBHOOK_SECRET\n", "");
         assert!(Config::from_yaml(&input).unwrap().validate().is_ok());
     }
 
