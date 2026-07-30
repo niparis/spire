@@ -99,6 +99,13 @@ The concrete secret store may vary between user and system installations. The CL
 owns its permissions and migrations; operators do not manually author
 `credential_ref` values.
 
+`spire auth login github` registers a GitHub App owned by the operator rather
+than asking for a pasted credential. Spire submits a manifest, the operator
+confirms one pre-filled page and installs the App, and Spire stores the returned
+private key and webhook secret directly. Operators do not fill in the App form,
+choose permissions, or handle the key. Every installation registers its own App;
+see [`github-app-identity.md`](github-app-identity.md).
+
 Codex and Claude Code authentication remains provider-native. Spire launches each
 harness as the configured runtime user and reuses that user's existing provider
 authentication. The initial harness configuration therefore has no Spire-managed

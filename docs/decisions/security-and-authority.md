@@ -22,7 +22,7 @@
 
 | Decision | Allowed choices | Current state |
 |---|---|---|
-| GitHub identity | GitHub App or scoped bot token | blocked |
+| GitHub identity | GitHub App or scoped bot token | GitHub App; see [`github-app-identity.md`](github-app-identity.md) |
 | Push model | maker direct push or mechanical publisher | blocked |
 | Admin endpoints | loopback-only or Cloudflare Access | blocked |
 | Human-status conflict policy | human wins / documented guarded projection | blocked |
@@ -31,3 +31,7 @@
 The GitHub identity must have only the minimum read/write scope needed for the
 chosen publisher model. Branch protection and token/app permissions must make a
 merge impossible independently of application logic.
+
+The App's `contents` permission stays conditional until the push-model row is
+decided. Every other permission is fixed by
+[`github-app-identity.md`](github-app-identity.md).
