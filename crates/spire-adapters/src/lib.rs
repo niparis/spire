@@ -6,7 +6,6 @@
 
 pub struct AdapterBoundary;
 
-pub mod cleanup;
 pub mod diagnostics;
 pub mod github;
 pub mod github_app;

@@ -76,6 +76,9 @@ pub struct OperationsSnapshot {
     pub active_runs: u64,
     pub active_ai_runs: u64,
     pub terminal_workspace_cleanup_backlog: u64,
+    pub project_mappings_enabled: u64,
+    pub project_mappings_disabled: u64,
+    pub project_mappings_stale_or_unhealthy: u64,
 }
 
 #[cfg(test)]

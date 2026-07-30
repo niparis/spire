@@ -1,8 +1,8 @@
 # Worktree-first workspace ownership
 
-**Status:** accepted; implementation pending
+**Status:** accepted; implemented in Sprint 14
 **Decision owner:** product owner
-**Last checked:** 2026-07-29
+**Last checked:** 2026-07-30
 
 ## Context
 
@@ -19,9 +19,8 @@ Linear ticket content is untrusted and may change while work is active. Linear
 therefore cannot choose branch names, filesystem paths, source repositories, or
 workspace lifecycle. Those are Orchestrator resource decisions.
 
-The current `WorkspaceAllocator` derives a branch string and creates a directory
-plus `.spire-owner` marker. It does not yet execute Git worktree operations, bind
-the workspace to a base SHA, or distinguish maker and reviewer workspaces.
+The directory-only `WorkspaceAllocator` that motivated this decision was replaced
+in Sprint 14 by the Git-aware adapter described below.
 
 ## Decision
 
@@ -207,16 +206,15 @@ implementation.
 - **Delete branch when deleting worktree:** conflates local resource cleanup with PR
   lifecycle.
 
-## Required follow-up
+## Follow-up
 
-- Implement the Git-aware adapter and forward-only workspace schema migration in
-  [`../sprints/14-durable-project-routing.md`](../sprints/14-durable-project-routing.md).
+- The Git-aware adapter and forward-only workspace schema migration are implemented
+  by [`../sprints/14-durable-project-routing.md`](../sprints/14-durable-project-routing.md).
 - Preserve Sprints 05, 08, and 09 as historical records of the behavior and
   evidence delivered at their completion; do not rewrite them to imply this later
   decision was already implemented.
-- Migrate the current directory-only allocator, reviewer isolation, recovery, and
-  cleanup behavior through Sprint 14 tests and deployment evidence before enabling
-  the new runtime contract.
+- Prove the implemented worktree lifecycle on the target VM before enabling the
+  runtime contract.
 - Resolve maker direct-push versus mechanical publisher separately.
 
 ## Unknown / unverified

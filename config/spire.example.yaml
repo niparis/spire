@@ -18,6 +18,7 @@ linear:
   # Populate only with values returned by the configured team's estimate scale.
   complexity_mapping: {}
   supported_type_labels: []
+  # Schema 3 transition inventory only. New work routes through `spire projects`.
   repository_mappings: []
 
 github:

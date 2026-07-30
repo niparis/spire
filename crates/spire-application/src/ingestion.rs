@@ -6,7 +6,10 @@
 //! on the same plan a reconciliation pass would produce.
 
 use serde::Serialize;
-use spire_domain::{ComplexityClass, LinearIssueId, RepositoryName, WorkItemState};
+use spire_domain::{
+    ComplexityClass, LinearIssueId, ProjectMappingRevision, ProjectRepositoryMappingId,
+    RepositoryName, WorkItemState,
+};
 
 use crate::{
     AdmissionCandidate, CanonicalLinearIssue, EligibilityReason, EligibilityResult,
@@ -80,6 +83,8 @@ pub struct ObservationUpsert {
     pub linear_identifier: String,
     pub team_id: String,
     pub workflow_state_id: String,
+    pub linear_project_id: Option<spire_domain::LinearProjectId>,
+    pub linear_project_name_snapshot: Option<String>,
     pub revision: String,
     pub raw_estimate: Option<u8>,
     pub complexity_class: Option<ComplexityClass>,
@@ -92,6 +97,8 @@ pub enum LifecycleDecision {
     /// Eligible and inside every rollout gate: the scheduler may claim it.
     Admit {
         repository: RepositoryName,
+        mapping_id: ProjectRepositoryMappingId,
+        mapping_revision: ProjectMappingRevision,
         complexity: ComplexityClass,
     },
     HoldIneligible {
@@ -152,6 +159,8 @@ pub fn plan_ingestion(input: IngestionInput<'_>) -> IngestionPlan {
         linear_identifier: issue.identifier.clone(),
         team_id: issue.team_id.clone(),
         workflow_state_id: issue.workflow_state_id.clone(),
+        linear_project_id: issue.project_id.clone(),
+        linear_project_name_snapshot: issue.project_name_snapshot.clone(),
         revision: issue.revision.clone(),
         raw_estimate: issue.estimate,
         complexity_class: complexity,
@@ -223,6 +232,8 @@ pub fn plan_ingestion(input: IngestionInput<'_>) -> IngestionPlan {
         ),
         EligibilityResult::Eligible {
             repository,
+            mapping_id,
+            mapping_revision,
             complexity,
         } => {
             let candidate = AdmissionCandidate {
@@ -236,6 +247,8 @@ pub fn plan_ingestion(input: IngestionInput<'_>) -> IngestionPlan {
                     observation,
                     LifecycleDecision::Admit {
                         repository: repository.clone(),
+                        mapping_id: *mapping_id,
+                        mapping_revision: *mapping_revision,
                         complexity: *complexity,
                     },
                     Vec::new(),
@@ -274,7 +287,8 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
-    use crate::{EligibilityInput, RepositoryMapping, evaluate_eligibility};
+    use crate::{EligibilityInput, ProjectRoutingDecision, evaluate_eligibility};
+    use spire_domain::{ProjectMappingRevision, ProjectRepositoryMappingId};
 
     fn issue(state: &str, revision: &str) -> CanonicalLinearIssue {
         CanonicalLinearIssue {
@@ -282,8 +296,8 @@ mod tests {
             identifier: "SPI-1".into(),
             team_id: "team".into(),
             workflow_state_id: state.into(),
-            project_id: None,
-            project_name_snapshot: None,
+            project_id: Some(spire_domain::LinearProjectId::new("project").unwrap()),
+            project_name_snapshot: Some("Project".into()),
             estimate: Some(2),
             priority: Some(1),
             labels: ["type:chore".into(), "repo:spire".into()]
@@ -302,17 +316,17 @@ mod tests {
 
     fn eligibility(issue: &CanonicalLinearIssue) -> EligibilityResult {
         let types = ["type:chore".to_owned()].into_iter().collect();
-        let mappings = vec![RepositoryMapping {
-            label: "repo:spire".into(),
+        let routing = ProjectRoutingDecision::Mapped {
+            mapping_id: ProjectRepositoryMappingId::new(),
+            mapping_revision: ProjectMappingRevision::new(1).unwrap(),
             repository: RepositoryName::new("owner/spire").unwrap(),
-            enabled: true,
-        }];
+        };
         let complexity = BTreeMap::from([(2, ComplexityClass::Medium)]);
         evaluate_eligibility(EligibilityInput {
             issue,
             ready_state_id: "ready",
             supported_type_labels: &types,
-            repository_mappings: &mappings,
+            project_routing: &routing,
             complexity_mapping: &complexity,
             incomplete_blockers: &BTreeSet::new(),
             locally_active: false,

@@ -5,10 +5,12 @@ use std::{
 };
 
 use spire_application::{
-    CanonicalPullRequest, CapacityCounts, CapacityLimits, CheckRun, NewProjectRepositoryMapping,
-    OperationsSnapshot, ProjectMappingPort, ProjectRepositoryMapping, ProjectRoutingDecision,
-    PullRequestState, RequiredCheckGate, ReviewResult, ReviewVerdict, SchedulerInitiator,
-    capacity_allows,
+    CanonicalPullRequest, CapacityCounts, CapacityLimits, CheckRun, MappingRepositoryHealth,
+    NewProjectRepositoryMapping, OperationsSnapshot, ProjectMappingHistoryEntry,
+    ProjectMappingPort, ProjectMappingTransitionPreflight, ProjectRepositoryMapping,
+    ProjectRoutingDecision, PullRequestState, RepositoryMappingTransitionInput, RequiredCheckGate,
+    ReviewResult, ReviewVerdict, SchedulerInitiator, WorkspaceAllocationState, WorkspaceKind,
+    WorkspaceRecord, capacity_allows,
 };
 use spire_domain::{
     LinearProjectId, ProjectMappingRevision, ProjectMappingStatus, ProjectRepositoryMappingId,
@@ -130,6 +132,8 @@ pub enum SqliteAdapterError {
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("project mapping data is invalid: {0}")]
     ProjectMappingContract(String),
+    #[error("workspace data is invalid: {0}")]
+    WorkspaceContract(String),
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +189,8 @@ pub struct LinearObservation<'a> {
     pub linear_identifier: &'a str,
     pub team_id: &'a str,
     pub workflow_state_id: &'a str,
+    pub linear_project_id: Option<&'a str>,
+    pub linear_project_name_snapshot: Option<&'a str>,
     pub revision: &'a str,
     pub raw_estimate: Option<u8>,
     pub complexity_class: Option<&'a str>,
@@ -196,6 +202,8 @@ pub struct RootClaim<'a> {
     pub work_item_id: &'a str,
     pub expected_revision: &'a str,
     pub repository: &'a str,
+    pub project_mapping_id: &'a str,
+    pub project_mapping_revision: u64,
     pub run_id: &'a str,
     pub decision_id: &'a str,
     pub raw_estimate: u8,
@@ -306,8 +314,18 @@ fn project_mapping_from_row(
         "disabled" => ProjectMappingStatus::Disabled,
         "removed" => ProjectMappingStatus::Removed,
         value => {
-            return Err(SqliteAdapterError::ProjectMappingContract(format!(
+            return Err(SqliteAdapterError::WorkspaceContract(format!(
                 "unknown mapping status {value}"
+            )));
+        }
+    };
+    let repository_health = match row.try_get::<String, _>("authority_state")?.as_str() {
+        "healthy" => MappingRepositoryHealth::Healthy,
+        "stale" => MappingRepositoryHealth::Stale,
+        "unhealthy" => MappingRepositoryHealth::Unhealthy,
+        value => {
+            return Err(SqliteAdapterError::WorkspaceContract(format!(
+                "unknown mapping authority state {value}"
             )));
         }
     };
@@ -326,6 +344,7 @@ fn project_mapping_from_row(
         git_remote_url: row.try_get("git_remote_url")?,
         default_branch: row.try_get("default_branch")?,
         status,
+        repository_health,
         revision: ProjectMappingRevision::new(row.try_get::<i64, _>("revision")? as u64)
             .map_err(|error| SqliteAdapterError::ProjectMappingContract(error.to_string()))?,
         created_at: row.try_get("created_at")?,
@@ -338,6 +357,73 @@ fn mapping_status_name(status: ProjectMappingStatus) -> &'static str {
         ProjectMappingStatus::Enabled => "enabled",
         ProjectMappingStatus::Disabled => "disabled",
         ProjectMappingStatus::Removed => "removed",
+    }
+}
+
+fn mapping_health_name(health: MappingRepositoryHealth) -> &'static str {
+    match health {
+        MappingRepositoryHealth::Healthy => "healthy",
+        MappingRepositoryHealth::Stale => "stale",
+        MappingRepositoryHealth::Unhealthy => "unhealthy",
+    }
+}
+
+fn workspace_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<WorkspaceRecord, SqliteAdapterError> {
+    let kind = match row.try_get::<String, _>("kind")?.as_str() {
+        "maker" => WorkspaceKind::Maker,
+        "reviewer" => WorkspaceKind::Reviewer,
+        value => {
+            return Err(SqliteAdapterError::ProjectMappingContract(format!(
+                "unsupported workspace kind {value}"
+            )));
+        }
+    };
+    let allocation_state = match row.try_get::<String, _>("allocation_state")?.as_str() {
+        "allocating" => WorkspaceAllocationState::Allocating,
+        "ready" => WorkspaceAllocationState::Ready,
+        "quarantined" => WorkspaceAllocationState::Quarantined,
+        "removing" => WorkspaceAllocationState::Removing,
+        "removed" => WorkspaceAllocationState::Removed,
+        value => {
+            return Err(SqliteAdapterError::ProjectMappingContract(format!(
+                "unsupported workspace allocation state {value}"
+            )));
+        }
+    };
+    Ok(WorkspaceRecord {
+        id: row.try_get("id")?,
+        work_item_id: row.try_get("work_item_id")?,
+        run_id: row.try_get("run_id")?,
+        kind,
+        root_run_id: row.try_get("root_run_id")?,
+        review_cycle_id: row.try_get("review_cycle_id")?,
+        path: row.try_get("path")?,
+        workspace_root: row.try_get("workspace_root")?,
+        repository_source_path: row.try_get("repository_source_path")?,
+        git_common_directory: row.try_get("git_common_directory")?,
+        base_sha: row.try_get("base_sha")?,
+        head_sha: row.try_get("head_sha")?,
+        branch: row.try_get("branch")?,
+        allocation_state,
+    })
+}
+
+fn workspace_kind_name(kind: WorkspaceKind) -> &'static str {
+    match kind {
+        WorkspaceKind::Maker => "maker",
+        WorkspaceKind::Reviewer => "reviewer",
+    }
+}
+
+fn workspace_state_name(state: WorkspaceAllocationState) -> &'static str {
+    match state {
+        WorkspaceAllocationState::Allocating => "allocating",
+        WorkspaceAllocationState::Ready => "ready",
+        WorkspaceAllocationState::Quarantined => "quarantined",
+        WorkspaceAllocationState::Removing => "removing",
+        WorkspaceAllocationState::Removed => "removed",
     }
 }
 
@@ -454,7 +540,173 @@ impl SqliteDatabase {
             )
             .fetch_one(&self.pool)
             .await? as u64,
+            project_mappings_enabled: sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM project_repository_mappings WHERE status = 'enabled'",
+            )
+            .fetch_one(&self.pool)
+            .await? as u64,
+            project_mappings_disabled: sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM project_repository_mappings WHERE status IN ('disabled', 'removed')",
+            )
+            .fetch_one(&self.pool)
+            .await? as u64,
+            project_mappings_stale_or_unhealthy: sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM project_repository_mappings WHERE status = 'enabled' AND authority_state != 'healthy'",
+            )
+            .fetch_one(&self.pool)
+            .await? as u64,
         })
+    }
+
+    pub async fn project_mapping_preflight(
+        &self,
+        configured_label_mappings: Vec<RepositoryMappingTransitionInput>,
+    ) -> Result<ProjectMappingTransitionPreflight, SqliteAdapterError> {
+        let unclaimed_observations = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM work_items WHERE active_run_id IS NULL AND state = 'observed'",
+        )
+        .fetch_one(&self.pool)
+        .await? as u64;
+        let active_work_items = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM work_items WHERE state IN ('claiming', 'queued', 'implementing', 'waiting_for_ci', 'waiting_for_review')",
+        )
+        .fetch_one(&self.pool)
+        .await? as u64;
+        Ok(ProjectMappingTransitionPreflight {
+            mappings_required: !configured_label_mappings.is_empty()
+                || unclaimed_observations > 0
+                || active_work_items > 0,
+            configured_label_mappings,
+            unclaimed_observations,
+            active_work_items,
+            migration_strategy: "select each stable Linear project explicitly; never infer it from labels or names",
+        })
+    }
+
+    pub async fn workspace_for_root_run(
+        &self,
+        root_run_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, SqliteAdapterError> {
+        sqlx::query(
+            "SELECT * FROM workspaces WHERE kind = 'maker' AND root_run_id = ? AND allocation_state != 'removed'",
+        )
+        .bind(root_run_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(workspace_from_row)
+        .transpose()
+    }
+
+    pub async fn workspace_for_review_cycle(
+        &self,
+        review_cycle_id: &str,
+    ) -> Result<Option<WorkspaceRecord>, SqliteAdapterError> {
+        sqlx::query(
+            "SELECT * FROM workspaces WHERE kind = 'reviewer' AND review_cycle_id = ? AND allocation_state != 'removed'",
+        )
+        .bind(review_cycle_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .as_ref()
+        .map(workspace_from_row)
+        .transpose()
+    }
+
+    pub async fn workspace(&self, id: &str) -> Result<Option<WorkspaceRecord>, SqliteAdapterError> {
+        sqlx::query("SELECT * FROM workspaces WHERE id = ? AND kind IN ('maker', 'reviewer')")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(workspace_from_row)
+            .transpose()
+    }
+
+    pub async fn allocating_workspaces(&self) -> Result<Vec<WorkspaceRecord>, SqliteAdapterError> {
+        sqlx::query(
+            "SELECT * FROM workspaces WHERE kind IN ('maker', 'reviewer') AND allocation_state = 'allocating' ORDER BY created_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(workspace_from_row)
+        .collect()
+    }
+
+    pub async fn insert_workspace_intent(
+        &self,
+        workspace: &WorkspaceRecord,
+        now: i64,
+    ) -> Result<(), SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        sqlx::query(
+            "INSERT INTO workspaces (id, work_item_id, run_id, path, status, kind, root_run_id, review_cycle_id, workspace_root, repository_source_path, git_common_directory, base_sha, head_sha, branch, allocation_state, marker_version, created_at, updated_at) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'allocating', 1, ?, ?)",
+        )
+        .bind(&workspace.id)
+        .bind(&workspace.work_item_id)
+        .bind(&workspace.run_id)
+        .bind(&workspace.path)
+        .bind(workspace_kind_name(workspace.kind))
+        .bind(&workspace.root_run_id)
+        .bind(&workspace.review_cycle_id)
+        .bind(&workspace.workspace_root)
+        .bind(&workspace.repository_source_path)
+        .bind(&workspace.git_common_directory)
+        .bind(&workspace.base_sha)
+        .bind(&workspace.head_sha)
+        .bind(&workspace.branch)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_workspace_state(
+        &self,
+        id: &str,
+        state: WorkspaceAllocationState,
+        quarantine_reason: Option<&str>,
+        now: i64,
+    ) -> Result<bool, SqliteAdapterError> {
+        let _write_gate = self.write_gate.lock().await;
+        let updated = sqlx::query(
+            "UPDATE workspaces SET allocation_state = ?, status = ?, quarantine_reason = ?, cleanup_started_at = CASE WHEN ? = 'removing' THEN ? ELSE cleanup_started_at END, cleanup_completed_at = CASE WHEN ? = 'removed' THEN ? ELSE cleanup_completed_at END, updated_at = ? WHERE id = ? AND kind IN ('maker', 'reviewer')",
+        )
+        .bind(workspace_state_name(state))
+        .bind(match state {
+            WorkspaceAllocationState::Quarantined => "quarantined",
+            WorkspaceAllocationState::Removed => "removed",
+            _ => "active",
+        })
+        .bind(quarantine_reason)
+        .bind(workspace_state_name(state))
+        .bind(now)
+        .bind(workspace_state_name(state))
+        .bind(now)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
+    }
+
+    pub async fn workspace_cleanup_authorized(
+        &self,
+        id: &str,
+        terminal_before: i64,
+        now: i64,
+    ) -> Result<bool, SqliteAdapterError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM workspaces ws JOIN work_items wi ON wi.id = ws.work_item_id WHERE ws.id = ? AND ws.kind IN ('maker', 'reviewer') AND ws.allocation_state IN ('ready', 'quarantined', 'removing') AND wi.state IN ('blocked', 'completed', 'canceled') AND wi.updated_at <= ? AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.work_item_id = wi.id AND (r.status IN ('queued', 'starting', 'running', 'cancel_requested') OR (r.lease_expires_at IS NOT NULL AND r.lease_expires_at >= ?))) AND NOT EXISTS (SELECT 1 FROM review_cycles rc WHERE rc.work_item_id = wi.id AND rc.review_state IN ('pending', 'running'))",
+        )
+        .bind(id)
+        .bind(terminal_before)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?
+            == 1)
     }
 
     pub async fn pragma(&self, name: &str) -> Result<String, SqliteAdapterError> {
@@ -1076,10 +1328,10 @@ impl SqliteDatabase {
     ) -> Result<bool, SqliteAdapterError> {
         let _write_gate = self.write_gate.lock().await;
         let result = sqlx::query(
-            "INSERT INTO work_items (id, linear_issue_id, linear_identifier, team_id, workflow_state_id, revision, raw_estimate, complexity_class, eligibility_reason, state, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'observed', ?, ?) \
+            "INSERT INTO work_items (id, linear_issue_id, linear_identifier, team_id, workflow_state_id, linear_project_id, linear_project_name_snapshot, revision, raw_estimate, complexity_class, eligibility_reason, state, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'observed', ?, ?) \
              ON CONFLICT(linear_issue_id) DO UPDATE SET \
-                linear_identifier = excluded.linear_identifier, team_id = excluded.team_id, workflow_state_id = excluded.workflow_state_id, revision = excluded.revision, raw_estimate = excluded.raw_estimate, complexity_class = excluded.complexity_class, eligibility_reason = excluded.eligibility_reason, updated_at = excluded.updated_at \
+                linear_identifier = excluded.linear_identifier, team_id = excluded.team_id, workflow_state_id = excluded.workflow_state_id, linear_project_id = excluded.linear_project_id, linear_project_name_snapshot = excluded.linear_project_name_snapshot, revision = excluded.revision, raw_estimate = excluded.raw_estimate, complexity_class = excluded.complexity_class, eligibility_reason = excluded.eligibility_reason, updated_at = excluded.updated_at \
              WHERE work_items.state NOT IN ('claiming', 'queued', 'implementing', 'waiting_for_ci', 'waiting_for_review') AND excluded.revision >= work_items.revision",
         )
         .bind(observation.work_item_id)
@@ -1087,6 +1339,8 @@ impl SqliteDatabase {
         .bind(observation.linear_identifier)
         .bind(observation.team_id)
         .bind(observation.workflow_state_id)
+        .bind(observation.linear_project_id)
+        .bind(observation.linear_project_name_snapshot)
         .bind(observation.revision)
         .bind(observation.raw_estimate.map(i64::from))
         .bind(observation.complexity_class)
@@ -1095,6 +1349,34 @@ impl SqliteDatabase {
         .bind(now)
         .execute(&self.pool)
         .await?;
+        if result.rows_affected() == 0 {
+            let active_project = sqlx::query_as::<_, (Option<String>, String)>(
+                "SELECT linear_project_id, state FROM work_items WHERE linear_issue_id = ?",
+            )
+            .bind(observation.linear_issue_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if active_project.is_some_and(|(project_id, state)| {
+                matches!(
+                    state.as_str(),
+                    "claiming"
+                        | "queued"
+                        | "implementing"
+                        | "waiting_for_ci"
+                        | "waiting_for_review"
+                ) && project_id.as_deref() != observation.linear_project_id
+            }) {
+                sqlx::query(
+                    "INSERT INTO notifications (id, idempotency_key, channel, severity, subject, body, status, created_at, updated_at) VALUES (?, ?, 'operator', 'warning', 'active_project_changed', 'An active Linear issue changed project; its snapshotted repository remains authoritative.', 'pending', ?, ?) ON CONFLICT(idempotency_key) DO NOTHING",
+                )
+                .bind(Uuid::new_v4().to_string())
+                .bind(format!("active-project-change:{}", observation.work_item_id))
+                .bind(now)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
         Ok(result.rows_affected() == 1)
     }
 
@@ -1126,8 +1408,8 @@ impl SqliteDatabase {
                 .bind(claim.decision_id).bind(claim.work_item_id).bind(claim.run_id).bind(i64::from(claim.policy_version)).bind(claim.implementation_rule_id).bind(i64::from(claim.raw_estimate)).bind(claim.complexity_class).bind(claim.candidate_json).bind(claim.evaluation_json).bind(now).execute(&mut *connection).await?;
             sqlx::query("INSERT INTO runs (id, work_item_id, root_run_id, role, harness, model, effort, status, dispatch_decision_id, initiator, trigger_kind, created_at, updated_at) VALUES (?, ?, ?, 'implementation', ?, ?, ?, 'starting', ?, ?, ?, ?, ?)")
                 .bind(claim.run_id).bind(claim.work_item_id).bind(claim.run_id).bind(claim.harness).bind(claim.model).bind(claim.effort).bind(claim.decision_id).bind(initiator_name(claim.initiator)).bind(claim.trigger_kind).bind(now).bind(now).execute(&mut *connection).await?;
-            sqlx::query("UPDATE work_items SET state = 'claiming', repository = ?, active_run_id = ?, updated_at = ? WHERE id = ?")
-                .bind(claim.repository).bind(claim.run_id).bind(now).bind(claim.work_item_id).execute(&mut *connection).await?;
+            sqlx::query("UPDATE work_items SET state = 'claiming', repository = ?, project_mapping_id = ?, project_mapping_revision = ?, active_run_id = ?, updated_at = ? WHERE id = ?")
+                .bind(claim.repository).bind(claim.project_mapping_id).bind(claim.project_mapping_revision as i64).bind(claim.run_id).bind(now).bind(claim.work_item_id).execute(&mut *connection).await?;
             sqlx::query("UPDATE work_items SET review_candidates_json = ?, review_policy_version = ?, review_rule_id = ? WHERE id = ?")
                 .bind(claim.review_candidate_json).bind(i64::from(claim.policy_version)).bind(claim.review_rule_id).bind(claim.work_item_id).execute(&mut *connection).await?;
             Ok(RootClaimResult::Claimed)
@@ -1378,10 +1660,7 @@ impl ProjectMappingPort for SqliteDatabase {
             .iter()
             .map(project_mapping_from_row)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(spire_application::resolve_project_routing(
-            &mappings,
-            spire_application::MappingRepositoryHealth::Healthy,
-        ))
+        Ok(spire_application::resolve_project_routing(&mappings))
     }
 
     async fn list(&self) -> Result<Vec<ProjectRepositoryMapping>, Self::Error> {
@@ -1392,6 +1671,72 @@ impl ProjectMappingPort for SqliteDatabase {
         .await?
         .iter()
         .map(project_mapping_from_row)
+        .collect()
+    }
+
+    async fn get(
+        &self,
+        id: ProjectRepositoryMappingId,
+    ) -> Result<Option<ProjectRepositoryMapping>, Self::Error> {
+        sqlx::query("SELECT * FROM project_repository_mappings WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .as_ref()
+            .map(project_mapping_from_row)
+            .transpose()
+    }
+
+    async fn history(
+        &self,
+        id: ProjectRepositoryMappingId,
+    ) -> Result<Vec<ProjectMappingHistoryEntry>, Self::Error> {
+        sqlx::query(
+            "SELECT id, mapping_id, actor, operation, previous_revision, new_revision, reason, mapping_snapshot_json, created_at FROM project_repository_mapping_history WHERE mapping_id = ? ORDER BY id",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let mapping = serde_json::from_str::<ProjectRepositoryMapping>(
+                &row.try_get::<String, _>("mapping_snapshot_json")?,
+            )
+            .map_err(|error| {
+                SqliteAdapterError::ProjectMappingContract(format!(
+                    "invalid mapping history snapshot: {error}"
+                ))
+            })?;
+            let previous_revision = row
+                .try_get::<Option<i64>, _>("previous_revision")?
+                .map(|value| {
+                    ProjectMappingRevision::new(value as u64).map_err(|error| {
+                        SqliteAdapterError::ProjectMappingContract(error.to_string())
+                    })
+                })
+                .transpose()?;
+            Ok(ProjectMappingHistoryEntry {
+                sequence: row.try_get("id")?,
+                mapping_id: ProjectRepositoryMappingId::parse(
+                    &row.try_get::<String, _>("mapping_id")?,
+                )
+                .map_err(|error| {
+                    SqliteAdapterError::ProjectMappingContract(error.to_string())
+                })?,
+                actor: row.try_get("actor")?,
+                operation: row.try_get("operation")?,
+                previous_revision,
+                new_revision: ProjectMappingRevision::new(
+                    row.try_get::<i64, _>("new_revision")? as u64,
+                )
+                .map_err(|error| {
+                    SqliteAdapterError::ProjectMappingContract(error.to_string())
+                })?,
+                reason: row.try_get("reason")?,
+                mapping,
+                created_at: row.try_get("created_at")?,
+            })
+        })
         .collect()
     }
 
@@ -1414,6 +1759,7 @@ impl ProjectMappingPort for SqliteDatabase {
             git_remote_url: mapping.git_remote_url,
             default_branch: mapping.default_branch,
             status: ProjectMappingStatus::Enabled,
+            repository_health: MappingRepositoryHealth::Healthy,
             revision: ProjectMappingRevision::new(1).expect("a literal mapping revision is valid"),
             created_at: now,
             updated_at: now,
@@ -1520,7 +1866,7 @@ impl SqliteDatabase {
                 mapping.revision = revision.next();
                 mapping.updated_at = mapping_now();
                 let updated = sqlx::query(
-                    "UPDATE project_repository_mappings SET linear_team_id = ?, linear_project_name_snapshot = ?, github_repository = ?, repository_source_path = ?, git_common_directory = ?, git_remote_url = ?, default_branch = ?, status = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?",
+                    "UPDATE project_repository_mappings SET linear_team_id = ?, linear_project_name_snapshot = ?, github_repository = ?, repository_source_path = ?, git_common_directory = ?, git_remote_url = ?, default_branch = ?, status = ?, authority_state = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ? AND status != 'removed'",
                 )
                 .bind(&mapping.linear_team_id)
                 .bind(&mapping.linear_project_name_snapshot)
@@ -1530,6 +1876,7 @@ impl SqliteDatabase {
                 .bind(&mapping.git_remote_url)
                 .bind(&mapping.default_branch)
                 .bind(mapping_status_name(mapping.status))
+                .bind(mapping_health_name(mapping.repository_health))
                 .bind(mapping.revision.value() as i64)
                 .bind(mapping.updated_at)
                 .bind(mapping.id.to_string())
@@ -1541,7 +1888,7 @@ impl SqliteDatabase {
                 }
             } else {
                 sqlx::query(
-                    "INSERT INTO project_repository_mappings (id, linear_organization_id, linear_team_id, linear_project_id, linear_project_name_snapshot, github_repository, repository_source_path, git_common_directory, git_remote_url, default_branch, status, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO project_repository_mappings (id, linear_organization_id, linear_team_id, linear_project_id, linear_project_name_snapshot, github_repository, repository_source_path, git_common_directory, git_remote_url, default_branch, status, authority_state, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(mapping.id.to_string())
                 .bind(&mapping.linear_organization_id)
@@ -1554,6 +1901,7 @@ impl SqliteDatabase {
                 .bind(&mapping.git_remote_url)
                 .bind(&mapping.default_branch)
                 .bind(mapping_status_name(mapping.status))
+                .bind(mapping_health_name(mapping.repository_health))
                 .bind(mapping.revision.value() as i64)
                 .bind(mapping.created_at)
                 .bind(mapping.updated_at)
@@ -1575,6 +1923,22 @@ impl SqliteDatabase {
             .bind(mapping.updated_at)
             .execute(&mut *connection)
             .await?;
+            if mapping.status != ProjectMappingStatus::Enabled {
+                sqlx::query(
+                    "INSERT INTO notifications (id, idempotency_key, channel, severity, subject, body, status, created_at, updated_at) SELECT ?, ?, 'operator', 'warning', 'active_mapping_disabled', 'A mapping referenced by active work was disabled or removed; active work remains bound to its snapshotted repository.', 'pending', ?, ? WHERE EXISTS (SELECT 1 FROM work_items WHERE project_mapping_id = ? AND state IN ('claiming', 'queued', 'implementing', 'waiting_for_ci', 'waiting_for_review')) ON CONFLICT(idempotency_key) DO NOTHING",
+                )
+                .bind(Uuid::new_v4().to_string())
+                .bind(format!(
+                    "active-mapping-disabled:{}:{}",
+                    mapping.id,
+                    mapping.revision.value()
+                ))
+                .bind(mapping.updated_at)
+                .bind(mapping.updated_at)
+                .bind(mapping.id.to_string())
+                .execute(&mut *connection)
+                .await?;
+            }
             Ok::<ProjectRepositoryMapping, sqlx::Error>(mapping)
         }
         .await;
@@ -1624,6 +1988,13 @@ mod tests {
             "wal"
         );
         database.check_integrity().await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM project_repository_mappings")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -2080,6 +2451,8 @@ mod tests {
             linear_identifier: "SPI-1",
             team_id: "team",
             workflow_state_id: "ready",
+            linear_project_id: Some("project"),
+            linear_project_name_snapshot: Some("Project"),
             revision: "2026-01-02:hash",
             raw_estimate: Some(2),
             complexity_class: Some("medium"),
@@ -2109,9 +2482,26 @@ mod tests {
             .unwrap();
         let active = LinearObservation {
             revision: "2026-01-03:hash",
+            linear_project_id: Some("project-2"),
+            linear_project_name_snapshot: Some("Moved"),
             ..newer
         };
         assert!(!database.upsert_linear_observation(active, 4).await.unwrap());
+        let persisted_project: String =
+            sqlx::query_scalar("SELECT linear_project_id FROM work_items WHERE id = 'work-1'")
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(persisted_project, "project");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM notifications WHERE idempotency_key = 'active-project-change:work-1'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2125,6 +2515,8 @@ mod tests {
                     linear_identifier: "SPI-1",
                     team_id: "team",
                     workflow_state_id: "ready",
+                    linear_project_id: Some("project"),
+                    linear_project_name_snapshot: Some("Project"),
                     revision: "revision",
                     raw_estimate: Some(2),
                     complexity_class: Some("medium"),
@@ -2140,10 +2532,31 @@ mod tests {
             per_repository: 1,
             per_ticket: 1,
         };
+        let mapping = database
+            .create(
+                NewProjectRepositoryMapping {
+                    linear_organization_id: "organization".into(),
+                    linear_team_id: "team".into(),
+                    linear_project_id: LinearProjectId::new("project").unwrap(),
+                    linear_project_name_snapshot: "Project".into(),
+                    github_repository: RepositoryName::new("owner/repo").unwrap(),
+                    repository_source_path: "/repositories/source".into(),
+                    git_common_directory: "/repositories/source/.git".into(),
+                    git_remote_url: "git@github.com:owner/repo.git".into(),
+                    default_branch: "main".into(),
+                },
+                "test",
+                None,
+            )
+            .await
+            .unwrap();
+        let mapping_id = mapping.id.to_string();
         let first = RootClaim {
             work_item_id: "work-1",
             expected_revision: "revision",
             repository: "owner/repo",
+            project_mapping_id: &mapping_id,
+            project_mapping_revision: mapping.revision.value(),
             run_id: "run-1",
             decision_id: "decision-1",
             raw_estimate: 2,
@@ -2181,6 +2594,33 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1);
+        let snapshot: (String, i64, String) = sqlx::query_as(
+            "SELECT project_mapping_id, project_mapping_revision, repository FROM work_items WHERE id = 'work-1'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot,
+            (
+                mapping_id,
+                mapping.revision.value() as i64,
+                "owner/repo".into()
+            )
+        );
+        database
+            .disable(mapping.id, mapping.revision, "operator", "maintenance")
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM notifications WHERE subject = 'active_mapping_disabled'",
+            )
+            .fetch_one(database.pool())
+            .await
+            .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -2503,6 +2943,43 @@ mod tests {
                 .await
                 .is_err()
         );
+        let mut left_revision = disabled.clone();
+        left_revision.linear_project_name_snapshot = "Renamed by left".into();
+        let mut right_revision = disabled.clone();
+        right_revision.linear_project_name_snapshot = "Renamed by right".into();
+        let (left, right) = tokio::join!(
+            database.revise(
+                left_revision,
+                disabled.revision,
+                "operator-left",
+                "concurrent rename"
+            ),
+            database.revise(
+                right_revision,
+                disabled.revision,
+                "operator-right",
+                "concurrent rename"
+            )
+        );
+        assert!(left.is_ok() ^ right.is_ok());
+        let current = database.get(mapping.id).await.unwrap().unwrap();
+        let removed = database
+            .tombstone(current.id, current.revision, "operator", "mapping retired")
+            .await
+            .unwrap();
+        let mut forbidden_reactivation = removed.clone();
+        forbidden_reactivation.status = ProjectMappingStatus::Enabled;
+        assert!(
+            database
+                .revise(
+                    forbidden_reactivation,
+                    removed.revision,
+                    "operator",
+                    "reactivate tombstone"
+                )
+                .await
+                .is_err()
+        );
         let history: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM project_repository_mapping_history WHERE mapping_id = ?",
         )
@@ -2510,6 +2987,37 @@ mod tests {
         .fetch_one(database.pool())
         .await
         .unwrap();
-        assert_eq!(history, 2);
+        assert_eq!(history, 4);
+        let backup = database.path().parent().unwrap().join("mapping-backup.db");
+        database.backup_to(&backup).await.unwrap();
+        let restored = SqliteDatabase::initialize(&backup, 1).await.unwrap();
+        assert_eq!(
+            restored.get(mapping.id).await.unwrap(),
+            database.get(mapping.id).await.unwrap()
+        );
+        assert_eq!(
+            restored.history(mapping.id).await.unwrap(),
+            database.history(mapping.id).await.unwrap()
+        );
+        assert!(
+            database
+                .create(
+                    NewProjectRepositoryMapping {
+                        linear_organization_id: "organization".into(),
+                        linear_team_id: "team".into(),
+                        linear_project_id: LinearProjectId::new("project").unwrap(),
+                        linear_project_name_snapshot: "Duplicate".into(),
+                        github_repository: RepositoryName::new("owner/other").unwrap(),
+                        repository_source_path: "/repositories/other".into(),
+                        git_common_directory: "/repositories/other/.git".into(),
+                        git_remote_url: "git@github.com:owner/other.git".into(),
+                        default_branch: "main".into(),
+                    },
+                    "operator",
+                    None,
+                )
+                .await
+                .is_err()
+        );
     }
 }

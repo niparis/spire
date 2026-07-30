@@ -22,6 +22,8 @@ pub struct ProjectRepositoryMapping {
     pub git_remote_url: String,
     pub default_branch: String,
     pub status: ProjectMappingStatus,
+    #[serde(default)]
+    pub repository_health: MappingRepositoryHealth,
     pub revision: ProjectMappingRevision,
     pub created_at: i64,
     pub updated_at: i64,
@@ -55,8 +57,10 @@ pub enum ProjectRoutingDecision {
     RepositoryUnhealthy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MappingRepositoryHealth {
+    #[default]
     Healthy,
     Stale,
     Unhealthy,
@@ -64,10 +68,7 @@ pub enum MappingRepositoryHealth {
 
 /// Resolves one project using only durable mapping state. A ticket's title,
 /// labels, description, and URLs never participate in this decision.
-pub fn resolve_project_routing(
-    mappings: &[ProjectRepositoryMapping],
-    health: MappingRepositoryHealth,
-) -> ProjectRoutingDecision {
+pub fn resolve_project_routing(mappings: &[ProjectRepositoryMapping]) -> ProjectRoutingDecision {
     let enabled = mappings
         .iter()
         .filter(|mapping| mapping.status == ProjectMappingStatus::Enabled)
@@ -84,7 +85,7 @@ pub fn resolve_project_routing(
             _ => ProjectRoutingDecision::RepositoryUnmapped,
         };
     };
-    match health {
+    match mapping.repository_health {
         MappingRepositoryHealth::Healthy => ProjectRoutingDecision::Mapped {
             mapping_id: mapping.id,
             mapping_revision: mapping.revision,
@@ -106,6 +107,16 @@ pub trait ProjectMappingPort {
     ) -> Result<ProjectRoutingDecision, Self::Error>;
 
     async fn list(&self) -> Result<Vec<ProjectRepositoryMapping>, Self::Error>;
+
+    async fn get(
+        &self,
+        id: ProjectRepositoryMappingId,
+    ) -> Result<Option<ProjectRepositoryMapping>, Self::Error>;
+
+    async fn history(
+        &self,
+        id: ProjectRepositoryMappingId,
+    ) -> Result<Vec<ProjectMappingHistoryEntry>, Self::Error>;
 
     async fn create(
         &self,
@@ -139,6 +150,52 @@ pub trait ProjectMappingPort {
     ) -> Result<ProjectRepositoryMapping, Self::Error>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMappingHistoryEntry {
+    pub sequence: i64,
+    pub mapping_id: ProjectRepositoryMappingId,
+    pub actor: String,
+    pub operation: String,
+    pub previous_revision: Option<ProjectMappingRevision>,
+    pub new_revision: ProjectMappingRevision,
+    pub reason: Option<String>,
+    pub mapping: ProjectRepositoryMapping,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectMappingTransitionPreflight {
+    pub configured_label_mappings: Vec<RepositoryMappingTransitionInput>,
+    pub unclaimed_observations: u64,
+    pub active_work_items: u64,
+    pub mappings_required: bool,
+    pub migration_strategy: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepositoryMappingTransitionInput {
+    pub label: String,
+    pub repository: RepositoryName,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanonicalRepositoryIdentity {
+    pub repository: RepositoryName,
+    pub default_branch: String,
+    pub archived: bool,
+}
+
+#[allow(async_fn_in_trait)]
+pub trait RepositoryIdentityPort {
+    type Error;
+
+    async fn get_repository_identity(
+        &self,
+        repository: &RepositoryName,
+    ) -> Result<crate::ExternalResult<CanonicalRepositoryIdentity>, Self::Error>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +213,7 @@ mod tests {
             git_remote_url: "git@github.com:owner/repository.git".into(),
             default_branch: "main".into(),
             status,
+            repository_health: MappingRepositoryHealth::Healthy,
             revision: ProjectMappingRevision::new(1).unwrap(),
             created_at: 1,
             updated_at: 1,
@@ -193,11 +251,14 @@ mod tests {
                 ProjectRoutingDecision::MappingAmbiguous,
             ),
         ];
-        for (mappings, health, expected) in cases {
-            assert_eq!(resolve_project_routing(&mappings, health), expected);
+        for (mut mappings, health, expected) in cases {
+            for mapping in &mut mappings {
+                mapping.repository_health = health;
+            }
+            assert_eq!(resolve_project_routing(&mappings), expected);
         }
         assert!(matches!(
-            resolve_project_routing(&[enabled], MappingRepositoryHealth::Healthy),
+            resolve_project_routing(&[enabled]),
             ProjectRoutingDecision::Mapped { .. }
         ));
     }

@@ -640,8 +640,9 @@ Validate the workflow with a controlled pilot:
   webhook-path exposure have not been configured.
 - **Harness runner:** systemd transient units are selected for the first design but
   have not been proven with Claude Code and Codex.
-- **Worktree adapter:** The current allocator creates a directory and ownership
-  marker but does not yet execute or reconcile Git worktree operations.
+- **Worktree adapter:** Git-aware maker/reviewer allocation, exact-marker recovery,
+  and fail-closed cleanup are implemented with deterministic local fixtures; live
+  target-VM behavior remains unverified.
 - **Repository commands:** Actual lint, typecheck, test, and build commands have not been inspected.
 - **Tracker integration:** Existing Linear statuses, labels, permissions, and GitHub synchronization have not been verified.
 - **Harness permissions:** Current Claude Code or Codex authentication and GitHub scopes have not been verified.

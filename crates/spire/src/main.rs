@@ -44,17 +44,23 @@ use spire_adapters::{
     linear::{LinearReadAdapter, load_credential},
     secrets::{UserAuthenticationMetadataStore, UserSecretStore},
     sqlite::{InboxEvent, LinearObservation, SqliteDatabase},
+    workspace::GitWorkspaceAdapter,
 };
 use spire_application::{
     AuthenticationMetadataStorePort, AuthenticationState, CanonicalLinearIssue, Config,
     DiagnosticFinding, DiagnosticReport, DiagnosticSeverity, EligibilityInput, ExternalResult,
     GitHubAuthenticationMetadata, GitTransportProbePort, HarnessProbePort, InstallationProfile,
-    LinearAuthenticationMetadata, LinearReadPort, ManagedSecret, RelevantIssueQuery,
-    SecretPromptPort, SecretStorePort, ServiceAuthenticationProbePort, ServiceContextProbePort,
-    ValidatedConfig, WebhookAllowlist, WebhookRequest, accept_delivery, dispatch_is_covered,
-    evaluate_eligibility,
+    LinearAuthenticationMetadata, LinearProjectReadPort, LinearReadPort, ManagedSecret,
+    MappingRepositoryHealth, NewProjectRepositoryMapping, ProjectMappingPort,
+    ProjectRoutingDecision, RelevantIssueQuery, RepositoryIdentityPort,
+    RepositoryMappingTransitionInput, SecretPromptPort, SecretStorePort,
+    ServiceAuthenticationProbePort, ServiceContextProbePort, ValidatedConfig, WebhookAllowlist,
+    WebhookRequest, accept_delivery, dispatch_is_covered, evaluate_eligibility,
 };
-use spire_domain::{ComplexityClass, Effort, HarnessId, LinearIssueId, RunRole};
+use spire_domain::{
+    ComplexityClass, Effort, HarnessId, LinearIssueId, LinearProjectId, ProjectMappingRevision,
+    ProjectMappingStatus, ProjectRepositoryMappingId, RepositoryName, RunRole,
+};
 use tokio::{net::TcpListener, sync::oneshot, time::timeout};
 use tracing::info;
 use uuid::Uuid;
@@ -101,6 +107,10 @@ enum Command {
     Doctor {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
+    },
+    Projects {
+        #[command(subcommand)]
+        command: ProjectsCommand,
     },
     Dispatch {
         #[command(subcommand)]
@@ -185,6 +195,68 @@ enum AuthService {
     Linear,
     #[value(name = "github")]
     GitHub,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProjectsCommand {
+    List {
+        /// Discover existing Linear projects instead of listing durable mappings.
+        #[arg(long)]
+        linear: bool,
+        #[arg(long, requires = "linear")]
+        include_archived: bool,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Map {
+        #[arg(long)]
+        linear_project_id: String,
+        #[arg(long)]
+        repository_source: PathBuf,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Show {
+        mapping_id: String,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Disable {
+        mapping_id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Remove {
+        mapping_id: String,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Doctor {
+        #[arg(long)]
+        mapping_id: Option<String>,
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Preflight {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
+    Reconcile {
+        #[arg(long, default_value = "text")]
+        format: OutputFormat,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -389,6 +461,14 @@ async fn main() -> Result<()> {
             )
             .await?
         }
+        Command::Projects { command } => {
+            projects_command(
+                load_config(config_override.as_deref(), system)?,
+                resolve_runtime_paths(config_override.as_deref(), system)?,
+                command,
+            )
+            .await?
+        }
         Command::Dispatch {
             command: DispatchCommand::DryRun { maker_harness },
         } => dispatch_dry_run(
@@ -453,8 +533,15 @@ async fn main() -> Result<()> {
             let paths = resolve_runtime_paths(config_override.as_deref(), system)?;
             let issue_id = LinearIssueId::new(issue).context("invalid Linear issue ID")?;
             let adapter = linear_adapter(&config, &paths)?;
+            let database = SqliteDatabase::initialize(
+                &config.config.runtime.database_path,
+                config.config.runtime.database_max_connections,
+            )
+            .await?;
             match adapter.get_canonical_issue(&issue_id).await? {
-                ExternalResult::Confirmed(issue) => print_json(&explain_issue(&config, &issue))?,
+                ExternalResult::Confirmed(issue) => {
+                    print_json(&explain_issue(&config, &database, &issue).await?)?
+                }
                 ExternalResult::NotFound => anyhow::bail!("Linear issue was not found"),
                 ExternalResult::Ambiguous { detail } => {
                     anyhow::bail!("ambiguous Linear response: {detail}")
@@ -577,7 +664,472 @@ fn linear_adapter(
         .context("failed to construct read-only Linear adapter")
 }
 
-fn explain_issue(config: &ValidatedConfig, issue: &CanonicalLinearIssue) -> serde_json::Value {
+async fn projects_command(
+    config: ValidatedConfig,
+    paths: spire_application::ResolvedPaths,
+    command: ProjectsCommand,
+) -> Result<()> {
+    let database = SqliteDatabase::initialize(
+        &config.config.runtime.database_path,
+        config.config.runtime.database_max_connections,
+    )
+    .await?;
+    match command {
+        ProjectsCommand::List {
+            linear,
+            include_archived,
+            format,
+        } => {
+            if linear {
+                let projects = list_linear_projects(&config, &paths, include_archived).await?;
+                project_output(
+                    &serde_json::json!({
+                        "source": "linear",
+                        "external_mutations": false,
+                        "projects": projects,
+                    }),
+                    format,
+                )?;
+            } else {
+                project_output(&database.list().await?, format)?;
+            }
+        }
+        ProjectsCommand::Show { mapping_id, format } => {
+            let id = ProjectRepositoryMappingId::parse(&mapping_id)
+                .context("invalid project mapping ID")?;
+            let mapping = database.get(id).await?.context("mapping was not found")?;
+            let history = database.history(id).await?;
+            project_output(
+                &serde_json::json!({"mapping": mapping, "history": history}),
+                format,
+            )?;
+        }
+        ProjectsCommand::Map {
+            linear_project_id,
+            repository_source,
+            reason,
+            yes,
+            format,
+        } => {
+            let project_id =
+                LinearProjectId::new(linear_project_id).context("invalid Linear project ID")?;
+            let linear = linear_adapter(&config, &paths)?;
+            let project = match linear.get_project(&project_id).await? {
+                ExternalResult::Confirmed(project) if !project.is_archived() => project,
+                ExternalResult::Confirmed(_) => anyhow::bail!("Linear project is archived"),
+                ExternalResult::NotFound => anyhow::bail!("Linear project was not found"),
+                ExternalResult::Ambiguous { detail } => {
+                    anyhow::bail!("Linear project lookup was ambiguous: {detail}")
+                }
+            };
+            let inspector = GitWorkspaceAdapter::new(
+                database.clone(),
+                SystemCommandExecutor,
+                "git",
+                config
+                    .config
+                    .operations
+                    .workspace_terminal_retention_seconds,
+            );
+            let source = inspector.inspect_repository_source(&repository_source)?;
+            if !source.worktree_capable {
+                anyhow::bail!("registered repository does not support Git worktrees")
+            }
+            let repository = RepositoryName::new(&source.github_repository)
+                .context("Git remote is not a canonical GitHub repository")?;
+            let github = github_adapter(&config, &paths).await?;
+            let identity = match github.get_repository_identity(&repository).await? {
+                ExternalResult::Confirmed(identity) if !identity.archived => identity,
+                ExternalResult::Confirmed(_) => anyhow::bail!("GitHub repository is archived"),
+                ExternalResult::NotFound => anyhow::bail!("GitHub repository was not found"),
+                ExternalResult::Ambiguous { detail } => {
+                    anyhow::bail!("GitHub repository lookup was ambiguous: {detail}")
+                }
+            };
+            if identity.repository != repository || identity.default_branch != source.default_branch
+            {
+                anyhow::bail!(
+                    "local remote/default branch does not match canonical GitHub identity"
+                )
+            }
+            let proposal = NewProjectRepositoryMapping {
+                linear_organization_id: config.config.linear.organization_id.clone(),
+                linear_team_id: config.config.linear.team_id.clone(),
+                linear_project_id: project.id,
+                linear_project_name_snapshot: project.name,
+                github_repository: repository,
+                repository_source_path: source.source_path,
+                git_common_directory: source.git_common_directory,
+                git_remote_url: source.remote_url,
+                default_branch: source.default_branch,
+            };
+            project_output(
+                &serde_json::json!({"commit": yes, "proposed_mapping": {
+                    "linear_organization_id": proposal.linear_organization_id,
+                    "linear_team_id": proposal.linear_team_id,
+                    "linear_project_id": proposal.linear_project_id,
+                    "linear_project_name_snapshot": proposal.linear_project_name_snapshot,
+                    "github_repository": proposal.github_repository,
+                    "repository_source_path": proposal.repository_source_path,
+                    "git_common_directory": proposal.git_common_directory,
+                    "git_remote_url": proposal.git_remote_url,
+                    "default_branch": proposal.default_branch,
+                }}),
+                format,
+            )?;
+            if !yes {
+                anyhow::bail!("mapping preview only; pass --yes to commit this exact mapping")
+            }
+            let actor = std::env::var("USER").unwrap_or_else(|_| "operator".into());
+            let mapping = database.create(proposal, &actor, reason.as_deref()).await?;
+            project_output(&mapping, format)?;
+        }
+        ProjectsCommand::Disable {
+            mapping_id,
+            expected_revision,
+            reason,
+            format,
+        } => {
+            ensure_mapping_reason(&reason)?;
+            let mapping = database
+                .disable(
+                    ProjectRepositoryMappingId::parse(&mapping_id)?,
+                    ProjectMappingRevision::new(expected_revision)?,
+                    "operator",
+                    &reason,
+                )
+                .await?;
+            project_output(&mapping, format)?;
+        }
+        ProjectsCommand::Remove {
+            mapping_id,
+            expected_revision,
+            reason,
+            format,
+        } => {
+            ensure_mapping_reason(&reason)?;
+            let mapping = database
+                .tombstone(
+                    ProjectRepositoryMappingId::parse(&mapping_id)?,
+                    ProjectMappingRevision::new(expected_revision)?,
+                    "operator",
+                    &reason,
+                )
+                .await?;
+            project_output(&mapping, format)?;
+        }
+        ProjectsCommand::Doctor { mapping_id, format } => {
+            let mappings = select_mappings(&database, mapping_id.as_deref()).await?;
+            let report = diagnose_project_mappings(&config, &paths, &database, mappings).await;
+            let ready = report
+                .iter()
+                .all(|entry| entry["ready"].as_bool() == Some(true));
+            project_output(
+                &serde_json::json!({"ready": ready, "mappings": report}),
+                format,
+            )?;
+            if !ready {
+                anyhow::bail!("one or more project mappings are not ready")
+            }
+        }
+        ProjectsCommand::Preflight { format } => {
+            let configured = config
+                .config
+                .linear
+                .repository_mappings
+                .iter()
+                .map(|mapping| RepositoryMappingTransitionInput {
+                    label: mapping.label.clone(),
+                    repository: mapping.repository.clone(),
+                    enabled: mapping.enabled,
+                })
+                .collect();
+            project_output(
+                &database.project_mapping_preflight(configured).await?,
+                format,
+            )?;
+        }
+        ProjectsCommand::Reconcile { format } => {
+            let report = reconcile_project_mappings(&config, &paths, &database, 0).await?;
+            project_output(&report, format)?;
+        }
+    }
+    Ok(())
+}
+
+async fn list_linear_projects(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+    include_archived: bool,
+) -> Result<Vec<spire_application::CanonicalLinearProject>> {
+    const MAX_PROJECT_PAGES: usize = 20;
+
+    let linear = linear_adapter(config, paths)?;
+    let mut projects = Vec::new();
+    let mut cursor = None;
+    for _ in 0..MAX_PROJECT_PAGES {
+        let page = match linear
+            .list_projects(&spire_application::LinearProjectQuery {
+                cursor: cursor.clone(),
+                include_archived,
+            })
+            .await?
+        {
+            ExternalResult::Confirmed(page) => page,
+            ExternalResult::NotFound => anyhow::bail!("Linear project collection was not found"),
+            ExternalResult::Ambiguous { detail } => {
+                anyhow::bail!("Linear project discovery was ambiguous: {detail}")
+            }
+        };
+        projects.extend(page.projects);
+        let Some(next_cursor) = page.next_cursor else {
+            return Ok(projects);
+        };
+        if cursor.as_deref() == Some(next_cursor.as_str()) {
+            anyhow::bail!("Linear project pagination repeated a cursor")
+        }
+        cursor = Some(next_cursor);
+    }
+    anyhow::bail!("Linear project discovery exceeded the bounded page limit")
+}
+
+async fn select_mappings(
+    database: &SqliteDatabase,
+    mapping_id: Option<&str>,
+) -> Result<Vec<spire_application::ProjectRepositoryMapping>> {
+    if let Some(mapping_id) = mapping_id {
+        let id = ProjectRepositoryMappingId::parse(mapping_id)?;
+        return Ok(vec![
+            database.get(id).await?.context("mapping was not found")?,
+        ]);
+    }
+    database.list().await.map_err(Into::into)
+}
+
+async fn diagnose_project_mappings(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+    database: &SqliteDatabase,
+    mappings: Vec<spire_application::ProjectRepositoryMapping>,
+) -> Vec<serde_json::Value> {
+    let linear = linear_adapter(config, paths);
+    let github = github_adapter(config, paths).await;
+    let inspector = GitWorkspaceAdapter::new(
+        database.clone(),
+        SystemCommandExecutor,
+        "git",
+        config
+            .config
+            .operations
+            .workspace_terminal_retention_seconds,
+    );
+    let mut report = Vec::with_capacity(mappings.len());
+    for mapping in mappings {
+        let mut failures = Vec::new();
+        match &linear {
+            Ok(linear) => match linear.get_project(&mapping.linear_project_id).await {
+                Ok(ExternalResult::Confirmed(project))
+                    if !project.is_archived()
+                        && project.id == mapping.linear_project_id
+                        && project.name == mapping.linear_project_name_snapshot => {}
+                Ok(ExternalResult::Confirmed(project)) if project.is_archived() => {
+                    failures.push("linear_project_archived")
+                }
+                Ok(ExternalResult::Confirmed(_)) => failures.push("linear_project_snapshot_stale"),
+                Ok(ExternalResult::NotFound) => failures.push("linear_project_missing"),
+                _ => failures.push("linear_project_unavailable"),
+            },
+            Err(_) => failures.push("linear_authentication_unavailable"),
+        }
+        match inspector.inspect_repository_source(&mapping.repository_source_path) {
+            Ok(source)
+                if source.git_common_directory == mapping.git_common_directory
+                    && source.remote_url == mapping.git_remote_url
+                    && source.github_repository == mapping.github_repository.as_str()
+                    && source.default_branch == mapping.default_branch
+                    && source.worktree_capable => {}
+            Ok(_) => failures.push("local_repository_snapshot_stale"),
+            Err(_) => failures.push("local_repository_unavailable"),
+        }
+        match &github {
+            Ok(github) => match github
+                .get_repository_identity(&mapping.github_repository)
+                .await
+            {
+                Ok(ExternalResult::Confirmed(identity))
+                    if !identity.archived
+                        && identity.repository == mapping.github_repository
+                        && identity.default_branch == mapping.default_branch => {}
+                Ok(ExternalResult::Confirmed(identity)) if identity.archived => {
+                    failures.push("github_repository_archived")
+                }
+                Ok(ExternalResult::Confirmed(_)) => {
+                    failures.push("github_repository_snapshot_stale")
+                }
+                Ok(ExternalResult::NotFound) => failures.push("github_repository_missing"),
+                _ => failures.push("github_repository_unavailable"),
+            },
+            Err(_) => failures.push("github_authentication_unavailable"),
+        }
+        report.push(serde_json::json!({
+            "mapping_id": mapping.id,
+            "revision": mapping.revision,
+            "ready": failures.is_empty() && mapping.status == ProjectMappingStatus::Enabled,
+            "status": mapping.status,
+            "failures": failures,
+        }));
+    }
+    report
+}
+
+async fn reconcile_project_mappings(
+    config: &ValidatedConfig,
+    paths: &spire_application::ResolvedPaths,
+    database: &SqliteDatabase,
+    offset: usize,
+) -> Result<serde_json::Value> {
+    const MAX_MAPPINGS_PER_PASS: usize = 100;
+
+    let mappings = database.list().await?;
+    let enabled_count = mappings
+        .iter()
+        .filter(|mapping| mapping.status == ProjectMappingStatus::Enabled)
+        .count();
+    let offset = offset.min(enabled_count);
+    let linear = linear_adapter(config, paths)?;
+    let github = github_adapter(config, paths).await?;
+    let inspector = GitWorkspaceAdapter::new(
+        database.clone(),
+        SystemCommandExecutor,
+        "git",
+        config
+            .config
+            .operations
+            .workspace_terminal_retention_seconds,
+    );
+    let mut inspected = 0_u64;
+    let mut revised = 0_u64;
+    let mut stale = 0_u64;
+    for mapping in mappings
+        .into_iter()
+        .filter(|mapping| mapping.status == ProjectMappingStatus::Enabled)
+        .skip(offset)
+        .take(MAX_MAPPINGS_PER_PASS)
+    {
+        inspected += 1;
+        let mut next = mapping.clone();
+        let mut provider_unavailable = false;
+        let mut authority_unhealthy = false;
+        match linear.get_project(&mapping.linear_project_id).await {
+            Ok(ExternalResult::Confirmed(project)) if !project.is_archived() => {
+                next.linear_project_name_snapshot = project.name;
+            }
+            Ok(ExternalResult::Confirmed(_) | ExternalResult::NotFound) => {
+                authority_unhealthy = true;
+            }
+            _ => provider_unavailable = true,
+        }
+        match github
+            .get_repository_identity(&mapping.github_repository)
+            .await
+        {
+            Ok(ExternalResult::Confirmed(identity)) if !identity.archived => {
+                if identity.repository == mapping.github_repository {
+                    next.default_branch = identity.default_branch;
+                } else {
+                    authority_unhealthy = true;
+                }
+            }
+            Ok(ExternalResult::Confirmed(_) | ExternalResult::NotFound) => {
+                authority_unhealthy = true;
+            }
+            _ => provider_unavailable = true,
+        }
+        match inspector.inspect_repository_source(&mapping.repository_source_path) {
+            Ok(source)
+                if source.github_repository == mapping.github_repository.as_str()
+                    && source.git_common_directory == mapping.git_common_directory =>
+            {
+                next.git_remote_url = source.remote_url;
+                if next.default_branch != source.default_branch {
+                    authority_unhealthy = true;
+                }
+            }
+            _ => authority_unhealthy = true,
+        }
+        next.repository_health =
+            reconciled_mapping_health(authority_unhealthy, provider_unavailable);
+        if next.repository_health != MappingRepositoryHealth::Healthy {
+            stale += 1;
+        }
+        if next.linear_project_name_snapshot != mapping.linear_project_name_snapshot
+            || next.default_branch != mapping.default_branch
+            || next.git_remote_url != mapping.git_remote_url
+            || next.repository_health != mapping.repository_health
+        {
+            database
+                .revise(
+                    next,
+                    mapping.revision,
+                    "reconciler",
+                    "refresh canonical project and repository snapshots",
+                )
+                .await?;
+            revised += 1;
+        }
+    }
+    let next_offset = if offset + inspected as usize >= enabled_count {
+        0
+    } else {
+        offset + inspected as usize
+    };
+    Ok(serde_json::json!({
+        "inspected": inspected,
+        "revised": revised,
+        "stale_or_unhealthy": stale,
+        "enabled_total": enabled_count,
+        "bounded_limit": MAX_MAPPINGS_PER_PASS,
+        "remaining": enabled_count.saturating_sub(offset + inspected as usize),
+        "next_offset": next_offset,
+        "external_mutations": false,
+    }))
+}
+
+fn reconciled_mapping_health(
+    authority_unhealthy: bool,
+    provider_unavailable: bool,
+) -> MappingRepositoryHealth {
+    if authority_unhealthy {
+        MappingRepositoryHealth::Unhealthy
+    } else if provider_unavailable {
+        MappingRepositoryHealth::Stale
+    } else {
+        MappingRepositoryHealth::Healthy
+    }
+}
+
+fn ensure_mapping_reason(reason: &str) -> Result<()> {
+    if reason.trim().is_empty() || reason.len() > 1024 {
+        anyhow::bail!("mapping reason must contain 1 to 1024 characters")
+    }
+    Ok(())
+}
+
+fn project_output(value: &impl serde::Serialize, format: OutputFormat) -> Result<()> {
+    match format {
+        OutputFormat::Json => print_json(value),
+        OutputFormat::Text => {
+            println!("{}", serde_yaml::to_string(value)?);
+            Ok(())
+        }
+    }
+}
+
+async fn explain_issue(
+    config: &ValidatedConfig,
+    database: &SqliteDatabase,
+    issue: &CanonicalLinearIssue,
+) -> Result<serde_json::Value> {
     let supported_types = config
         .config
         .linear
@@ -592,11 +1144,19 @@ fn explain_issue(config: &ValidatedConfig, issue: &CanonicalLinearIssue) -> serd
         .iter()
         .map(|(estimate, class)| (estimate.value(), *class))
         .collect::<BTreeMap<_, _>>();
+    let project_routing = match issue.project_id.as_ref() {
+        Some(project_id) => {
+            database
+                .resolve(&config.config.linear.organization_id, project_id)
+                .await?
+        }
+        None => ProjectRoutingDecision::RepositoryUnmapped,
+    };
     let eligibility = evaluate_eligibility(EligibilityInput {
         issue,
         ready_state_id: &config.config.linear.ready_state_id,
         supported_type_labels: &supported_types,
-        repository_mappings: &config.config.linear.repository_mappings,
+        project_routing: &project_routing,
         complexity_mapping: &complexity_mapping,
         incomplete_blockers: &BTreeSet::new(),
         locally_active: false,
@@ -606,7 +1166,9 @@ fn explain_issue(config: &ValidatedConfig, issue: &CanonicalLinearIssue) -> serd
             .and_then(|value| complexity_mapping.get(&value).copied())
             .is_some_and(|class| dispatch_is_covered(&config.policy, &config.capabilities, class)),
     });
-    serde_json::json!({"issue": issue, "eligibility": eligibility, "linear_writes_enabled": false})
+    Ok(
+        serde_json::json!({"issue": issue, "eligibility": eligibility, "linear_writes_enabled": false}),
+    )
 }
 
 async fn linear_reconcile(
@@ -637,7 +1199,7 @@ async fn linear_reconcile(
             }
         };
         for issue in page.issues {
-            let report = explain_issue(&config, &issue);
+            let report = explain_issue(&config, &database, &issue).await?;
             let eligibility = report.get("eligibility").cloned().unwrap_or_default();
             let complexity = eligibility
                 .get("complexity")
@@ -655,6 +1217,8 @@ async fn linear_reconcile(
                         linear_identifier: &issue.identifier,
                         team_id: &issue.team_id,
                         workflow_state_id: &issue.workflow_state_id,
+                        linear_project_id: issue.project_id.as_ref().map(|id| id.as_str()),
+                        linear_project_name_snapshot: issue.project_name_snapshot.as_deref(),
                         revision: &issue.revision,
                         raw_estimate: issue.estimate,
                         complexity_class: complexity,
@@ -1858,7 +2422,8 @@ async fn serve(config: ValidatedConfig, paths: spire_application::ResolvedPaths)
             .map(|entry| entry.repository.clone())
             .collect(),
     };
-    spawn_github_reconciliation(database, readiness.github.clone());
+    spawn_github_reconciliation(database.clone(), readiness.github.clone());
+    spawn_project_mapping_reconciliation(config.clone(), paths.clone(), database.clone());
     let api = TcpListener::bind(config.config.server.api_bind)
         .await
         .context("failed to bind API listener")?;
@@ -1899,6 +2464,28 @@ fn spawn_github_reconciliation(database: SqliteDatabase, github: Option<GitHubHt
                 .await
             {
                 tracing::warn!(error = %error, "GitHub active-PR reconciliation failed");
+            }
+        }
+    });
+}
+
+fn spawn_project_mapping_reconciliation(
+    config: ValidatedConfig,
+    paths: spire_application::ResolvedPaths,
+    database: SqliteDatabase,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(300));
+        let mut offset = 0;
+        loop {
+            ticker.tick().await;
+            match reconcile_project_mappings(&config, &paths, &database, offset).await {
+                Ok(report) => {
+                    offset = report["next_offset"].as_u64().unwrap_or_default() as usize;
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "project mapping reconciliation failed");
+                }
             }
         }
     });
@@ -2215,6 +2802,26 @@ mod tests {
         let signature = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
         assert!(verify_github_signature(secret, &signature, body));
         assert!(!verify_github_signature(secret, &signature, b"{}"));
+    }
+
+    #[test]
+    fn mapping_reconciliation_recovers_after_transient_failures() {
+        assert_eq!(
+            reconciled_mapping_health(false, true),
+            MappingRepositoryHealth::Stale
+        );
+        assert_eq!(
+            reconciled_mapping_health(false, false),
+            MappingRepositoryHealth::Healthy
+        );
+        assert_eq!(
+            reconciled_mapping_health(true, false),
+            MappingRepositoryHealth::Unhealthy
+        );
+        assert_eq!(
+            reconciled_mapping_health(true, true),
+            MappingRepositoryHealth::Unhealthy
+        );
     }
 
     #[test]
