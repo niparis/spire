@@ -110,6 +110,9 @@ Artifacts:
 - `tests/fixtures/harness/codex/*.jsonl`
 - `docs/decisions/codex-adapter-contract.md`
 
+The capture procedure is
+[`../runbooks/harness-fixture-capture.md`](../runbooks/harness-fixture-capture.md).
+
 Verification:
 
 - Each captured fixture maps to exactly one normalized outcome.
@@ -135,6 +138,9 @@ Artifacts:
 
 - `tests/fixtures/harness/claude/*.jsonl`
 - `docs/decisions/claude-adapter-contract.md`
+
+The capture procedure is
+[`../runbooks/harness-fixture-capture.md`](../runbooks/harness-fixture-capture.md).
 
 Verification:
 

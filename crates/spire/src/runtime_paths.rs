@@ -124,8 +124,12 @@ fn resolve_explicit_user_paths(
         ensure_existing_parent_is_directory(root)?;
         ensure_current_user_owns_existing_parent(root)?;
     }
-    ensure_existing_parent_is_directory(&config_file)?;
-    ensure_current_user_owns_existing_parent(&config_file)?;
+    let config_parent = config_file
+        .parent()
+        .context("configuration path must have a parent directory")?;
+    ensure_existing_parent_is_directory(config_parent)?;
+    ensure_current_user_owns_existing_parent(config_parent)?;
+    ensure_config_leaf_is_owned_regular_file(&config_file)?;
     Ok(ResolvedPaths {
         profile: InstallationProfile::User,
         config_file,
@@ -162,6 +166,27 @@ fn validate_distinct_roots<'a>(roots: impl IntoIterator<Item = &'a Path>) -> Res
         }
     }
     Ok(())
+}
+
+/// The configuration file is a leaf, not a root: it may legitimately not exist
+/// yet.  When it does exist it must be a regular file owned by the current user,
+/// because every command reads authority decisions from it.
+fn ensure_config_leaf_is_owned_regular_file(config_file: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(config_file) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("unable to inspect {}", config_file.display()));
+        }
+    };
+    if !metadata.is_file() {
+        bail!(
+            "configuration path {} must be a regular file",
+            config_file.display()
+        )
+    }
+    ensure_current_user_owns(config_file)
 }
 
 fn ensure_existing_parent_is_directory(path: &Path) -> Result<()> {
@@ -256,6 +281,18 @@ mod tests {
         path
     }
 
+    /// Tests that create or remove a configuration file need an isolated home so
+    /// they cannot observe each other's leaf state.
+    fn isolated_home(name: &str) -> PathBuf {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("spire-path-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(path.join(".config/spire")).unwrap();
+        path
+    }
+
     #[test]
     fn uses_xdg_fallbacks() {
         let home = temporary_home();
@@ -288,6 +325,64 @@ mod tests {
         );
         let paths = resolve_paths(None, false, &environment).unwrap();
         assert_eq!(paths.config_file, from_environment);
+    }
+
+    #[test]
+    fn resolves_when_the_configuration_file_already_exists() {
+        let home = isolated_home("existing-leaf");
+        let config_file = home.join(".config/spire/config.yaml");
+        fs::write(&config_file, "schema_version: 4\n").unwrap();
+        let paths = resolve_paths(None, false, &environment(home.to_str().unwrap())).unwrap();
+        assert_eq!(paths.config_file, config_file);
+    }
+
+    #[test]
+    fn resolves_when_the_configuration_file_is_absent() {
+        let home = isolated_home("absent-leaf");
+        let paths = resolve_paths(None, false, &environment(home.to_str().unwrap())).unwrap();
+        assert_eq!(paths.config_file, home.join(".config/spire/config.yaml"));
+    }
+
+    #[test]
+    fn rejects_a_configuration_parent_that_is_a_regular_file() {
+        let home = isolated_home("file-parent");
+        let parent = home.join("not-a-directory");
+        fs::write(&parent, "").unwrap();
+        let mut environment = environment(home.to_str().unwrap());
+        environment.insert(
+            SPIRE_CONFIG.to_owned(),
+            parent.join("config.yaml").display().to_string(),
+        );
+        assert!(resolve_paths(None, false, &environment).is_err());
+    }
+
+    #[test]
+    fn rejects_a_configuration_leaf_that_is_not_a_regular_file() {
+        let home = isolated_home("directory-leaf");
+        fs::create_dir_all(home.join(".config/spire/config.yaml")).unwrap();
+        assert!(resolve_paths(None, false, &environment(home.to_str().unwrap())).is_err());
+    }
+
+    /// Creating a foreign-owned file needs privilege, so this asserts the leaf
+    /// ownership guard against a file the host already owns as another user. It
+    /// self-skips when no such candidate is present.
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_configuration_leaf_owned_by_another_user() {
+        use std::os::unix::fs::MetadataExt;
+
+        let current = nix::unistd::Uid::current().as_raw();
+        let candidate = ["/private/etc/hosts", "/etc/hosts", "/etc/passwd"]
+            .into_iter()
+            .map(Path::new)
+            .find(|path| match fs::symlink_metadata(path) {
+                Ok(metadata) => metadata.is_file() && metadata.uid() != current,
+                Err(_) => false,
+            });
+        let Some(candidate) = candidate else {
+            return;
+        };
+        assert!(ensure_config_leaf_is_owned_regular_file(candidate).is_err());
     }
 
     #[test]
