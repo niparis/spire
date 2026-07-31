@@ -74,16 +74,30 @@ cat > "${capture_root}/result-schema.json" <<'JSON'
   "additionalProperties": false,
   "required": ["schema_version", "outcome", "session_id", "evidence_reference"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"type": "integer", "enum": [1]},
     "outcome": {
+      "type": "string",
       "enum": ["pr_ready", "specs_needed", "blocked", "no_change", "task_failed"]
     },
     "session_id": {"type": ["string", "null"]},
-    "evidence_reference": {"type": "string", "minLength": 1}
+    "evidence_reference": {"type": "string"}
   }
 }
 JSON
 ```
+
+The two harnesses do not accept the same JSON Schema. Claude Code accepts
+ordinary JSON Schema; Codex forwards the schema to OpenAI structured outputs,
+which rejects the request with `invalid_json_schema` (HTTP 400) unless every
+property carries an explicit `type`, every property appears in `required`, and
+`additionalProperties` is `false`. Validator keywords such as `const`,
+`minLength`, `pattern`, and `minimum` are not accepted there.
+
+The schema above is the intersection that both providers accept. Keep it that
+way: a schema that only Claude tolerates fails Codex at request validation,
+before any inference, which is cheap to discover but easy to miss because the
+Claude capture succeeds first. Non-emptiness of `evidence_reference` is enforced
+by `parse_structured_result`, not by the schema.
 
 Use one no-op task for every success capture so outcomes stay comparable:
 
