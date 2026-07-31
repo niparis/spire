@@ -36,10 +36,10 @@
     {
       "id": "codex-success",
       "harness": "codex",
-      "capture_state": "required",
+      "capture_state": "captured",
       "normalized_outcome": "pr_ready",
       "required_fields": ["terminal_event", "exit_status", "thread_id", "structured_output"],
-      "redaction_confirmed": false
+      "redaction_confirmed": true
     }
   ]
 }
