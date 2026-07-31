@@ -2,19 +2,43 @@
   "schema_version": 1,
   "fixtures": [
     {
-      "id": "codex-success",
-      "harness": "codex",
+      "id": "claude-success",
+      "harness": "claude_code",
+      "capture_state": "captured",
+      "normalized_outcome": "pr_ready",
+      "required_fields": ["terminal_event", "exit_status", "session_id", "structured_output"],
+      "redaction_confirmed": true
+    },
+    {
+      "id": "claude-auth-failed",
+      "harness": "claude_code",
+      "capture_state": "captured",
+      "normalized_outcome": "auth_failed",
+      "required_fields": ["terminal_event", "exit_status", "session_id", "is_error", "api_error_status"],
+      "redaction_confirmed": true
+    },
+    {
+      "id": "claude-resume",
+      "harness": "claude_code",
       "capture_state": "required",
       "normalized_outcome": "pr_ready",
       "required_fields": ["terminal_event", "exit_status", "session_id", "structured_output"],
       "redaction_confirmed": false
     },
     {
-      "id": "claude-success",
-      "harness": "claude_code",
-      "capture_state": "blocked",
-      "normalized_outcome": "runner_unhealthy",
-      "required_fields": ["terminal_event", "exit_status", "session_id", "structured_output"],
+      "id": "codex-quota-exhausted",
+      "harness": "codex",
+      "capture_state": "captured",
+      "normalized_outcome": "quota_exhausted",
+      "required_fields": ["terminal_event", "exit_status", "thread_id", "error_message"],
+      "redaction_confirmed": true
+    },
+    {
+      "id": "codex-success",
+      "harness": "codex",
+      "capture_state": "required",
+      "normalized_outcome": "pr_ready",
+      "required_fields": ["terminal_event", "exit_status", "thread_id", "structured_output"],
       "redaction_confirmed": false
     }
   ]
