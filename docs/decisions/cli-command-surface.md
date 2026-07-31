@@ -34,10 +34,14 @@ unchanged.
 
 ### 2. The visible surface is the approved product surface
 
-`spire --help` now lists exactly these ten commands:
+`spire --help` now lists exactly these eleven commands:
 
-`paths`, `service`, `start`, `stop`, `status`, `config`, `auth`, `doctor`,
-`projects` (with `list` / `map` / `show` / `disable` / `remove`), `serve`.
+`init`, `paths`, `service`, `start`, `stop`, `status`, `config`, `auth`,
+`doctor`, `projects` (with `list` / `map` / `show` / `disable` / `remove`),
+`serve`.
+
+`init` was added after PR #39 as the first-run entry point named by
+`docs/decisions/first-run-onboarding-and-project-mapping.md`.
 
 New user-facing capabilities go through this surface. Anything else must
 either become part of it or stay hidden.
@@ -99,6 +103,8 @@ shortcut.
 ## References
 
 - PR #39 — hides the ten commands.
+- `docs/decisions/first-run-onboarding-and-project-mapping.md` — makes `init`
+  the primary first-run interface.
 - `docs/sprints/12-user-runtime-and-configuration.md` — original target
   command surface for user runtime.
 - `docs/sprints/13-authentication-and-diagnostics.md` — auth and doctor

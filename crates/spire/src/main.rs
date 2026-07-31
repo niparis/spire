@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod init;
 mod runtime_paths;
 mod user_service;
 
@@ -85,6 +86,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Interactively provision a user installation from a Linear workspace.
+    Init {
+        /// Read the Linear API key from an owner-only 0600 file instead of the
+        /// terminal. No secret is ever accepted as an argument.
+        #[arg(long)]
+        credential_file: Option<PathBuf>,
+    },
     Paths {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
@@ -399,6 +407,13 @@ async fn main() -> Result<()> {
         command,
     } = Cli::parse();
     match command {
+        Command::Init { credential_file } => {
+            init::run(
+                resolve_runtime_paths(config_override.as_deref(), system)?,
+                credential_file,
+            )
+            .await?
+        }
         Command::Paths { format } => print_paths(
             resolve_runtime_paths(config_override.as_deref(), system)?,
             format,
