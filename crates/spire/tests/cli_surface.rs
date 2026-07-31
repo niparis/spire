@@ -7,8 +7,8 @@ use std::process::Command;
 
 /// Commands `spire --help` is allowed to advertise.
 const VISIBLE_TOP_LEVEL: &[&str] = &[
-    "paths", "service", "start", "stop", "status", "config", "auth", "doctor", "projects", "serve",
-    "help",
+    "init", "paths", "service", "start", "stop", "status", "config", "auth", "doctor", "projects",
+    "serve", "help",
 ];
 
 /// Subcommands `spire projects --help` is allowed to advertise.

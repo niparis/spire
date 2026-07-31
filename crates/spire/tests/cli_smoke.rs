@@ -15,7 +15,8 @@ use std::{
 /// Commands whose `--help` must render. Mirrors the approved surface in
 /// `docs/decisions/cli-command-surface.md`.
 const VISIBLE_TOP_LEVEL: &[&str] = &[
-    "paths", "service", "start", "stop", "status", "config", "auth", "doctor", "projects", "serve",
+    "init", "paths", "service", "start", "stop", "status", "config", "auth", "doctor", "projects",
+    "serve",
 ];
 
 fn fixture_config() -> PathBuf {
