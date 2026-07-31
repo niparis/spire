@@ -88,10 +88,10 @@ grep -Fqx "${expected_checksum}" "${checksums}" || {
   exit 1
 }
 
-readonly expected_members=$'LICENSE\nVERSION\nspire'
+readonly expected_members=$'LICENSE\nVERSION\nmodel-catalog.yaml\nspire'
 readonly archive_members="$(tar -tzf "${archive}" | LC_ALL=C sort)"
 [[ "${archive_members}" == "${expected_members}" ]] || {
-  printf 'release archive must contain exactly LICENSE, VERSION, and spire\n' >&2
+  printf 'release archive must contain exactly LICENSE, VERSION, model-catalog.yaml, and spire\n' >&2
   exit 1
 }
 [[ "$(tar -xOf "${archive}" VERSION)" == "${version}" ]] || {

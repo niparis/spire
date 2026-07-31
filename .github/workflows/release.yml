@@ -204,7 +204,7 @@ jobs:
             --output install.sh
           sh install.sh
           [[ "$("${SPIRE_BIN_DIR}/spire" --version)" == "spire ${SPIRE_VERSION#v}" ]]
-          [[ "$(find "${SPIRE_BIN_DIR}" -maxdepth 1 -type f | wc -l | tr -d ' ')" == 1 ]]
+          [[ "$(find "${SPIRE_BIN_DIR}" -maxdepth 1 -type f | wc -l | tr -d ' ')" == 2 ]]
 
   promote_latest:
     name: Promote verified release to latest

@@ -108,10 +108,12 @@ actual_checksum="$(sha256_file "${temporary_directory}/${archive}")"
 
 tar -xzf "${temporary_directory}/${archive}" -C "${temporary_directory}"
 [ -x "${temporary_directory}/spire" ] || fail "release archive does not contain an executable spire binary"
+[ -f "${temporary_directory}/model-catalog.yaml" ] || fail "release archive does not contain model-catalog.yaml"
 installed_version="$("${temporary_directory}/spire" --version)" || fail "release binary could not report its version"
 [ "${installed_version}" = "spire ${version#v}" ] || fail "release binary version does not match ${version}"
 
 mkdir -p "${bin_dir}"
 install -m 0755 "${temporary_directory}/spire" "${bin_dir}/spire"
+install -m 0644 "${temporary_directory}/model-catalog.yaml" "${bin_dir}/model-catalog.yaml"
 printf 'installed Spire %s to %s/spire\n' "${version}" "${bin_dir}"
 [ "$("${bin_dir}/spire" --version)" = "spire ${version#v}" ] || fail "installed binary version does not match ${version}"
