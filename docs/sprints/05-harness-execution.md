@@ -6,9 +6,9 @@
 
 ## Outcome
 
-The orchestrator can allocate a safe worktree, start Codex or Claude Code in a
-recoverable systemd transient unit, collect a schema-validated result, classify
-capacity failures, and recover after restart. Starts remain manual/admin-triggered.
+The orchestrator can allocate a safe worktree, start Codex or Claude Code as a
+supervised child process, collect a schema-validated result, classify capacity
+failures, and recover after restart. Starts remain manual/admin-triggered.
 
 ## Entry criteria
 
@@ -61,24 +61,35 @@ Verification:
 - Provider prose cannot directly advance lifecycle state.
 - Unknown and malformed results retain raw redacted evidence.
 
-### S05.3 Implement the systemd transient runner
+### S05.3 Implement the supervised process runner
+
+Execution is portable and has no systemd dependency; see
+[`../decisions/harness-process-execution.md`](../decisions/harness-process-execution.md).
 
 Implementation:
 
-1. Create unit name `spire-run-<run-id>.service`.
+1. Spawn an explicit executable and argument vector, never shell text, in a new
+   session and process group.
 2. Set working directory, environment allowlist, provider-native runtime-user
-   authentication context, timeout, and resource controls. Managed credentials
-   remain limited to non-harness integrations.
+   authentication context, and deadline. Managed credentials remain limited to
+   non-harness integrations.
 3. Capture stdout/stderr or provider JSONL in a per-run evidence path.
 4. Implement start, inspect, cancel, and collect operations.
-5. On cancellation, send graceful stop then force kill after configured grace.
-6. Record systemd unit and PID metadata.
+5. On cancellation, signal the process group: `SIGTERM` once, then `SIGKILL`
+   after the configured grace period.
+6. Record `(pid, process start time, process group id)` in the same transaction
+   that marks the run live.
 
 Verification:
 
-- Service restart rediscovers running units.
+- Restart adopts a live run by matching `(pid, process start time)` and does not
+  adopt an unrelated process that reused the pid.
+- A run that ended during downtime is classified from evidence, not assumed
+  successful.
+- A live run past its deadline is terminated at adoption.
 - Repeated start for the same Run does not launch twice.
-- Cancellation is idempotent.
+- Cancellation is idempotent and leaves no process in the group.
+- The same runner tests pass on Linux and macOS.
 
 ### S05.4 Implement Codex adapter
 
@@ -208,7 +219,7 @@ Verification:
 
 ## Suggested pull-request slices
 
-1. Workspace and transient runner.
+1. Workspace and supervised process runner.
 2. Provider-neutral schemas and Codex adapter.
 3. Claude adapter and circuit breakers.
 4. Fallback, continuation, monitoring, and manual demo.

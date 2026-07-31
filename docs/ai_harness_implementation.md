@@ -1650,8 +1650,8 @@ homelab VM
 │   └── cleanup worker
 ├── cloudflared.service
 │   └── public HTTPS → localhost webhook listener
-├── transient harness units
-│   ├── spire-run-<run-id>.service
+├── supervised harness runs
+│   ├── one session/process group per run
 │   └── provider CLI process
 ├── SQLite database
 └── controlled worktree roots
@@ -1661,9 +1661,12 @@ The Orchestrator is one Rust binary managed by systemd. Internal Tokio tasks per
 the API, scheduling, reconciliation, monitoring, and maintenance roles. This keeps
 SQLite access local and avoids pretending the initial service is distributed.
 
-Launch each Code Harness through a recoverable systemd transient unit named from the
-run ID. After an Orchestrator restart, the runner adapter can inspect the unit instead
-of assuming an orphaned child process is dead.
+Launch each Code Harness as a supervised child process in its own session and
+process group. Persist `(pid, process start time, process group id)` with the run
+before treating it as live. After an Orchestrator restart the runner compares that
+pair against the live process, so it verifies rather than assumes whether the run
+survived. See
+[`decisions/harness-process-execution.md`](decisions/harness-process-execution.md).
 
 Use a remotely-managed Cloudflare Tunnel and run `cloudflared` as a separate systemd
 service. Route only public webhook paths to the Axum listener. Keep admin endpoints
@@ -2020,7 +2023,7 @@ coverage. The worktree lifecycle is not yet proven on the target VM.
 8. Close a PR without merging.
 9. Merge a PR while the GitHub webhook endpoint is unavailable.
 10. Fill the workspace disk to the admission threshold.
-11. Restart `spire-orchestrator.service` while a transient harness unit is running.
+11. Restart `spire-orchestrator.service` while a harness run is live.
 12. Stop `cloudflared.service` beyond the webhook retry window, restore it, and
     confirm reconciliation repairs state.
 13. Queue several AI-derived reviews/corrections and confirm only the configured
@@ -2110,11 +2113,12 @@ duplicate implementation or same-provider review.
 - **GitHub configuration:** the identity is a GitHub App (`docs/decisions/github-app-identity.md`); repository list, required checks, merge queue, and branch protection are unknown.
 - **Dispatch policy:** Supported triplets, exact model IDs, effort translations,
   and candidate fallback ordering are undefined.
-- **Capacity classification:** Real Codex and Claude Code exit codes/output for
-  context exhaustion, subscription quota, rate limiting, model unavailability, and
-  reset timestamps have not been captured.
-- **Harness runner:** systemd transient units are recommended but not proven with
-  both Claude Code and Codex.
+- **Capacity classification:** partially resolved. Subscription quota, rate-limit
+  shape, authentication failure, and reset-timestamp availability are captured in
+  `tests/fixtures/harness/`; context exhaustion, output limits, and model
+  unavailability are not.
+- **Harness runner:** resolved; runs are supervised child processes. Restart
+  adoption and signal handling are not yet exercised against a live harness.
 - **Worktree execution:** Git-aware maker allocation, detached review worktrees,
   crash reconciliation, and fail-closed cleanup are implemented with deterministic
   local fixtures; target-VM Git and linked-worktree behavior remains unverified.

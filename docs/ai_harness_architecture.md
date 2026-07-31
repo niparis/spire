@@ -638,8 +638,10 @@ Validate the workflow with a controlled pilot:
   exceptional maker reassignment require live harness tests.
 - **Cloudflare configuration:** Hostnames, tunnel ownership, access policy, and
   webhook-path exposure have not been configured.
-- **Harness runner:** systemd transient units are selected for the first design but
-  have not been proven with Claude Code and Codex.
+- **Harness runner:** resolved. Runs are supervised child processes identified by
+  `(pid, start time, process group)`; see
+  [`decisions/harness-process-execution.md`](decisions/harness-process-execution.md).
+  Restart adoption is not yet exercised against a live harness.
 - **Worktree adapter:** Git-aware maker/reviewer allocation, exact-marker recovery,
   and fail-closed cleanup are implemented with deterministic local fixtures; live
   target-VM behavior remains unverified.

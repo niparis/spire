@@ -81,7 +81,7 @@ workspace root.
 ## Recovery and rollback
 
 - **Lost run:** retain the workspace/evidence, inspect the external harness or
-  transient unit, then use the durable run lease state. Never launch a second
+  process group, then use the durable run lease state. Never launch a second
   mutating run merely because a heartbeat stopped.
 - **Provider wait:** inspect candidate health and reset time. Do not switch a
   sticky maker or select the maker as reviewer; capacity waits consume no
