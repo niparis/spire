@@ -159,7 +159,7 @@ Execute and retain evidence for:
 1. Duplicate and missed Linear webhook.
 2. Crash after inbox commit.
 3. Crash after state/outbox commit.
-4. Orchestrator restart with live transient unit.
+4. Orchestrator restart with a live harness run.
 5. Linear/GitHub outage during projection.
 6. New PR SHA during review.
 7. Preferred provider exhausted before start.

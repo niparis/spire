@@ -148,28 +148,36 @@ Verification:
   outcomes remain distinct.
 - Resume uses the recorded session without reusing hidden maker context for review.
 
-### S00.6 Prove systemd transient-run recovery
+### S00.6 Prove supervised-process run recovery
+
+Execution is portable, so this spike runs on any development host as well as the
+target VM; see
+[`../decisions/harness-process-execution.md`](../decisions/harness-process-execution.md).
 
 Implementation:
 
-1. Start a harmless long-running command as a transient unit named from a fake run
-   UUID.
-2. Query unit state and main PID.
-3. Restart the spike controller and rediscover the unit.
-4. Stop the unit gracefully, then force termination after a deadline.
+1. Start a harmless long-running command in its own session and process group.
+2. Record `(pid, process start time, process group id)` and read the start time
+   back on the host platform.
+3. Restart the spike controller and re-adopt the run by matching the recorded
+   pair.
+4. Signal the process group gracefully, then force termination after a deadline.
 5. Confirm stdout/stderr capture location and retention.
-6. Define the safe unit-name encoding and allowed environment/credential injection.
+6. Define the allowed environment and credential injection for a run.
 
 Artifacts:
 
-- `docs/decisions/systemd-runner-contract.md`
-- Redacted sample unit properties.
+- `docs/decisions/harness-process-execution.md`
+- Redacted sample process metadata.
 
 Verification:
 
 - Controller restart never launches a duplicate process.
-- A missing unit is distinguishable from a finished unit.
+- A finished run is distinguishable from a missing one.
+- A recycled pid is rejected because the recorded start time does not match.
+- Terminating the group leaves no descendant process running.
 - The command cannot escape its configured working directory or credential scope.
+- The same spike passes on Linux and macOS.
 
 ### S00.7 Prove SQLite and filesystem assumptions on the VM
 
@@ -222,7 +230,7 @@ Verification:
 ## Sprint demo
 
 Run all fixture parsers offline, show the complete dispatch matrix, start and
-rediscover a transient unit, and restore a SQLite backup. No production ticket or
+re-adopt a live run, and restore a SQLite backup. No production ticket or
 repository is mutated.
 
 ## Exit criteria

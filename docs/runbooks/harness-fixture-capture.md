@@ -304,11 +304,10 @@ real usage-limit event by exhausting an account.
 - `contract_invalid` describes a provider response the schema rejects and cannot
   be reliably induced. Exercise it in tests by mutating a captured fixture; do
   not create a hand-written fixture for it.
-- S00.6 systemd transient-run recovery cannot be captured on macOS. It stays
-  blocked in
-  [`../decisions/systemd-runner-contract.md`](../decisions/systemd-runner-contract.md)
-  pending target-VM evidence or an accepted decision to support direct process
-  spawn for development hosts.
+- S00.6 run recovery is no longer platform-blocked: execution is portable, so the
+  spike runs on any development host. See
+  [`../decisions/harness-process-execution.md`](../decisions/harness-process-execution.md).
+  It is still unexercised against a live harness.
 - Exact model IDs, effort mappings, and whether Claude usage-limit reset
   timestamps are machine-readable or message-only remain installation-specific
   discovery inputs.
