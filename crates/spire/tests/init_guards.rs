@@ -1,7 +1,7 @@
-//! `spire init` refuses to run where it could destroy existing state.
+//! `spire init` checks terminal safety before opening its full-screen editor.
 //!
-//! The interview itself needs a Linear workspace and a terminal, so only the
-//! guards that run before any prompt are covered here.
+//! The editor itself is covered by terminal-free application and TestBackend
+//! tests; this file covers the process-level guard and its no-write behavior.
 
 use std::{
     env, fs,
@@ -53,22 +53,26 @@ fn init_refuses_to_run_without_a_terminal() {
 }
 
 #[test]
-fn init_refuses_to_replace_an_existing_configuration() {
+fn init_keeps_an_existing_configuration_untouched_when_no_terminal_is_available() {
     let root = sandbox("existing");
     let config = root.join("config/spire/config.yaml");
     fs::create_dir_all(config.parent().expect("parent")).expect("config root should be creatable");
-    fs::write(&config, "schema_version: 4\n").expect("the existing config should be writable");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/config/valid-dispatch.yaml");
+    let original =
+        fs::read_to_string(fixture).expect("the valid config fixture should be readable");
+    fs::write(&config, &original).expect("the existing config should be writable");
 
     let (success, output) = init(&root);
 
     assert!(
         !success,
-        "init must not overwrite a configuration:\n{output}"
+        "init must fail before entering the editor without a terminal:\n{output}"
     );
-    assert!(output.contains("already exists"), "{output}");
+    assert!(output.contains("requires a terminal"), "{output}");
     assert_eq!(
         fs::read_to_string(&config).expect("the existing config should still be readable"),
-        "schema_version: 4\n",
+        original,
         "the existing configuration must be untouched"
     );
     let _ = fs::remove_dir_all(&root);

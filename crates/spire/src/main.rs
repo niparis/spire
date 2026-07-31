@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod init;
+mod onboarding_editor;
 mod runtime_paths;
 mod user_service;
 
