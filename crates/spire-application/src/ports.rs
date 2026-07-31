@@ -58,6 +58,68 @@ pub trait LinearReadPort {
     ) -> Result<ExternalResult<CanonicalIssuePage>, Self::Error>;
 }
 
+/// Linear's own classification of a workflow state. It narrows a suggestion but
+/// never establishes a semantic mapping on its own: several Linear states share
+/// one category, and only the operator can say which one Spire should treat as
+/// ready, blocked, or specs-needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinearStateCategory {
+    Triage,
+    Backlog,
+    Unstarted,
+    Started,
+    Completed,
+    Canceled,
+    Unrecognized,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinearTeamSummary {
+    pub id: String,
+    pub key: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinearWorkflowState {
+    pub id: String,
+    pub name: String,
+    pub category: LinearStateCategory,
+}
+
+/// A team's estimate scale, already normalized to the point values Spire may
+/// receive on an issue. `points` is empty when the team does not estimate, which
+/// makes the team ineligible: Spire cannot classify complexity without it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinearEstimateScale {
+    pub kind: String,
+    pub points: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LinearTeamConfiguration {
+    pub team: LinearTeamSummary,
+    pub states: Vec<LinearWorkflowState>,
+    pub estimates: LinearEstimateScale,
+}
+
+/// Read-only Linear boundary used by first-run onboarding. It exists separately
+/// from `LinearReadPort` because onboarding runs before a configuration exists,
+/// so it cannot depend on a resolved team or workflow contract.
+#[allow(async_fn_in_trait)]
+pub trait LinearOnboardingDiscoveryPort {
+    type Error;
+
+    /// Every team the authenticated viewer can see, across all pages.
+    async fn list_teams(&self) -> Result<Vec<LinearTeamSummary>, Self::Error>;
+
+    async fn team_configuration(
+        &self,
+        team_id: &str,
+    ) -> Result<ExternalResult<LinearTeamConfiguration>, Self::Error>;
+}
+
 /// Mutating Linear boundary. It is a separate port from `LinearReadPort` so a
 /// build, a command, or a test can hold read authority without write authority.
 ///

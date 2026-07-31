@@ -75,6 +75,26 @@ version, then follow the [service restart procedure](docs/runbooks/operations-an
 To roll back, reinstall the prior approved tag and follow the
 [recovery and rollback runbook](docs/runbooks/operations-and-pilot.md#recovery-and-rollback).
 
+## First run
+
+`spire init` provisions a user installation interactively. It asks for a Linear
+API key, discovers the teams, workflow states, and estimate scale that key can
+see, and asks you to confirm every mapping it suggests. Nothing is written until
+the last answer is given; the configuration is then created in one atomic write.
+An interrupted run leaves the installation untouched and is restarted, not
+resumed.
+
+```sh
+spire init
+spire doctor
+```
+
+Init cannot discover the GitHub App installation, Cloudflare, or webhook values.
+It writes `REPLACE_ME_` placeholders for those and prints what remains to be
+filled in; the configuration deliberately fails validation until you do.
+
+On macOS there is no service to install — run `spire serve` in the foreground.
+
 ## User runtime configuration
 
 The default installation is user-scoped: Spire resolves `--config`, then

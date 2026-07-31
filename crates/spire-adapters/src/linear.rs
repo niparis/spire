@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use spire_application::{
     AuthenticationState, CanonicalIssuePage, CanonicalLinearIssue, CanonicalLinearProject,
-    CanonicalLinearProjectPage, ExternalResult, LinearProjectQuery, LinearProjectReadPort,
-    LinearReadPort, ProbeConfidence, RelevantIssueQuery, ServiceAuthenticationProbe,
-    ServiceAuthenticationProbePort,
+    CanonicalLinearProjectPage, ExternalResult, LinearEstimateScale, LinearOnboardingDiscoveryPort,
+    LinearProjectQuery, LinearProjectReadPort, LinearReadPort, LinearStateCategory,
+    LinearTeamConfiguration, LinearTeamSummary, LinearWorkflowState, ProbeConfidence,
+    RelevantIssueQuery, ServiceAuthenticationProbe, ServiceAuthenticationProbePort,
 };
 use spire_domain::{LinearIssueId, LinearProjectId};
 use thiserror::Error;
@@ -24,6 +25,7 @@ use tracing::debug;
 const ENDPOINT: &str = "https://api.linear.app/graphql";
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
 const PAGE_SIZE: usize = 50;
+const MAX_DISCOVERY_PAGES: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LinearHealthDiagnostic {
@@ -226,6 +228,74 @@ impl LinearReadAdapter {
     /// Verifies the current API key using the non-mutating `viewer` query.
     pub async fn verify_viewer(&self) -> Result<LinearViewerIdentity, LinearAdapterError> {
         normalize_viewer_probe(self.request(VIEWER_QUERY, json!({})).await?)
+    }
+}
+
+impl LinearOnboardingDiscoveryPort for LinearReadAdapter {
+    type Error = LinearAdapterError;
+
+    async fn list_teams(&self) -> Result<Vec<LinearTeamSummary>, Self::Error> {
+        let mut teams = Vec::new();
+        let mut cursor: Option<String> = None;
+        // Bounded so a provider that never clears `hasNextPage` cannot pin the
+        // onboarding prompt in an unbounded loop.
+        for _ in 0..MAX_DISCOVERY_PAGES {
+            let data = self
+                .request(TEAMS_QUERY, json!({"first": PAGE_SIZE, "after": cursor}))
+                .await?;
+            reject_graphql_errors(&data)?;
+            let connection = data
+                .pointer("/data/teams")
+                .ok_or(LinearAdapterError::MalformedResponse)?;
+            for node in connection
+                .pointer("/nodes")
+                .and_then(Value::as_array)
+                .ok_or(LinearAdapterError::MalformedResponse)?
+            {
+                teams.push(parse_team(node)?);
+            }
+            if !connection
+                .pointer("/pageInfo/hasNextPage")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Ok(teams);
+            }
+            cursor = connection
+                .pointer("/pageInfo/endCursor")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if cursor.is_none() {
+                return Err(LinearAdapterError::MalformedResponse);
+            }
+        }
+        Err(LinearAdapterError::MalformedResponse)
+    }
+
+    async fn team_configuration(
+        &self,
+        team_id: &str,
+    ) -> Result<ExternalResult<LinearTeamConfiguration>, Self::Error> {
+        let data = self
+            .request(TEAM_CONFIGURATION_QUERY, json!({"id": team_id}))
+            .await?;
+        reject_graphql_errors(&data)?;
+        let team = data.pointer("/data/team").cloned().unwrap_or(Value::Null);
+        // A team with more than a page of workflow states is beyond what
+        // onboarding can present for confirmation; stop rather than truncate.
+        if team
+            .pointer("/states/pageInfo/hasNextPage")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Ok(ExternalResult::Ambiguous {
+                detail: "team has more workflow states than onboarding can confirm".to_owned(),
+            });
+        }
+        Ok(match normalize_team_configuration(team)? {
+            Some(configuration) => ExternalResult::Confirmed(configuration),
+            None => ExternalResult::NotFound,
+        })
     }
 }
 
@@ -590,6 +660,106 @@ const PROJECT_QUERY: &str =
     "query Project($id: String!) { project(id: $id) { id name archivedAt } }";
 const PROJECTS_QUERY: &str = "query Projects($first: Int!, $after: String, $includeArchived: Boolean!) { projects(first: $first, after: $after, includeArchived: $includeArchived) { nodes { id name archivedAt } pageInfo { hasNextPage endCursor } } }";
 const VIEWER_QUERY: &str = "query Viewer { viewer { id organization { id } } }";
+const TEAMS_QUERY: &str = "query Teams($first: Int!, $after: String) { teams(first: $first, after: $after) { nodes { id key name } pageInfo { hasNextPage endCursor } } }";
+const TEAM_CONFIGURATION_QUERY: &str = "query TeamConfiguration($id: String!) { team(id: $id) { id key name issueEstimationType issueEstimationAllowZero issueEstimationExtended states(first: 100) { nodes { id name type position } pageInfo { hasNextPage endCursor } } } }";
+
+/// Point values Linear can attach to an issue for a given estimation type.
+/// Zero is excluded because `ComplexityEstimate` rejects it; a team that allows
+/// zero simply leaves those issues unestimated as far as Spire is concerned.
+fn estimate_points(kind: &str, extended: bool) -> Vec<u8> {
+    match kind {
+        "exponential" if extended => vec![1, 2, 4, 8, 16],
+        "exponential" => vec![1, 2, 4, 8],
+        "fibonacci" if extended => vec![1, 2, 3, 5, 8, 13],
+        "fibonacci" => vec![1, 2, 3, 5, 8],
+        "linear" if extended => vec![1, 2, 3, 4, 5, 6, 7],
+        "linear" => vec![1, 2, 3, 4, 5],
+        "tShirt" => vec![1, 2, 3, 5, 8],
+        _ => Vec::new(),
+    }
+}
+
+fn state_category(kind: Option<&str>) -> LinearStateCategory {
+    match kind {
+        Some("triage") => LinearStateCategory::Triage,
+        Some("backlog") => LinearStateCategory::Backlog,
+        Some("unstarted") => LinearStateCategory::Unstarted,
+        Some("started") => LinearStateCategory::Started,
+        Some("completed") => LinearStateCategory::Completed,
+        Some("canceled") => LinearStateCategory::Canceled,
+        _ => LinearStateCategory::Unrecognized,
+    }
+}
+
+fn parse_team(value: &Value) -> Result<LinearTeamSummary, LinearAdapterError> {
+    let field = |name: &str| {
+        value
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(LinearAdapterError::MalformedResponse)
+    };
+    Ok(LinearTeamSummary {
+        id: field("id")?.to_owned(),
+        key: field("key")?.to_owned(),
+        name: field("name")?.to_owned(),
+    })
+}
+
+/// Converts a captured `team` response into the onboarding contract. States keep
+/// Linear's own ordering so a suggestion never depends on response order.
+pub fn normalize_team_configuration(
+    value: Value,
+) -> Result<Option<LinearTeamConfiguration>, LinearAdapterError> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let team = parse_team(&value)?;
+    let mut states = value
+        .pointer("/states/nodes")
+        .and_then(Value::as_array)
+        .ok_or(LinearAdapterError::MalformedResponse)?
+        .iter()
+        .map(|state| {
+            let id = state
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or(LinearAdapterError::MalformedResponse)?;
+            let name = state
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or(LinearAdapterError::MalformedResponse)?;
+            Ok((
+                state.get("position").and_then(Value::as_f64).unwrap_or(0.0),
+                LinearWorkflowState {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    category: state_category(state.get("type").and_then(Value::as_str)),
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>, LinearAdapterError>>()?;
+    states.sort_by(|left, right| left.0.total_cmp(&right.0));
+
+    let kind = value
+        .get("issueEstimationType")
+        .and_then(Value::as_str)
+        .unwrap_or("notUsed");
+    let extended = value
+        .get("issueEstimationExtended")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Ok(Some(LinearTeamConfiguration {
+        team,
+        states: states.into_iter().map(|(_, state)| state).collect(),
+        estimates: LinearEstimateScale {
+            kind: kind.to_owned(),
+            points: estimate_points(kind, extended),
+        },
+    }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -626,6 +796,55 @@ mod tests {
         assert!(archived.is_archived());
         assert_eq!(normalize_project_fixture(Value::Null).unwrap(), None);
         assert!(normalize_project_fixture(serde_json::json!({"id":"","name":""})).is_err());
+    }
+
+    #[test]
+    fn team_configuration_orders_states_by_position_and_normalizes_categories() {
+        let configuration = normalize_team_configuration(serde_json::json!({
+            "id": "team-1",
+            "key": "SPI",
+            "name": "Spire",
+            "issueEstimationType": "fibonacci",
+            "issueEstimationAllowZero": true,
+            "issueEstimationExtended": false,
+            "states": {"nodes": [
+                {"id": "done", "name": "Done", "type": "completed", "position": 4.0},
+                {"id": "todo", "name": "Todo", "type": "unstarted", "position": 1.0},
+                {"id": "doing", "name": "In Progress", "type": "started", "position": 2.0},
+                {"id": "odd", "name": "Parked", "type": "invented", "position": 3.0}
+            ], "pageInfo": {"hasNextPage": false, "endCursor": null}}
+        }))
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            configuration
+                .states
+                .iter()
+                .map(|state| state.id.as_str())
+                .collect::<Vec<_>>(),
+            ["todo", "doing", "odd", "done"]
+        );
+        assert_eq!(
+            configuration.states[2].category,
+            LinearStateCategory::Unrecognized
+        );
+        // Zero is never offered even when the team allows it.
+        assert_eq!(configuration.estimates.points, [1, 2, 3, 5, 8]);
+    }
+
+    #[test]
+    fn a_team_without_estimates_reports_an_empty_scale() {
+        let configuration = normalize_team_configuration(serde_json::json!({
+            "id": "team-1", "key": "SPI", "name": "Spire",
+            "issueEstimationType": "notUsed",
+            "states": {"nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}}
+        }))
+        .unwrap()
+        .unwrap();
+
+        assert!(configuration.estimates.points.is_empty());
+        assert_eq!(normalize_team_configuration(Value::Null).unwrap(), None);
     }
 
     #[test]
