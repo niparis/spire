@@ -1,6 +1,6 @@
 # Claude Code adapter contract
 
-**Status:** success and authentication-failure runs captured; resume still required
+**Status:** success, resume, and authentication-failure runs captured
 **Observed environment:** macOS 26.5.1; Node.js v25.8.0; Claude Code 2.1.148;
 model `claude-opus-4-7`; `authMethod: claude.ai`, `apiKeySource: none`; 2026-07-30
 
@@ -14,8 +14,8 @@ procedure is [`../runbooks/harness-fixture-capture.md`](../runbooks/harness-fixt
 
 ## Result classification
 
-`subtype` does not indicate success. Both captures terminate with
-`subtype: "success"` and differ only in `is_error`:
+`subtype` does not indicate success. The success and authentication-failure
+captures both terminate with `subtype: "success"` and differ only in `is_error`:
 
 | Fixture | `subtype` | `is_error` | `api_error_status` | `stop_reason` | `terminal_reason` |
 |---|---|---|---|---|---|
@@ -42,6 +42,29 @@ carried the real identifier. The adapter must persist the session from the event
 and never from the structured result. On the authentication failure,
 `structured_output` was absent entirely.
 
+## Resume
+
+`claude -r <session-id>` preserves the session identifier: the resumed run
+reported the same `session_id` as the run it continued. A run's external
+identifier is therefore stable across resume and can be persisted once.
+
+Two consequences for the adapter:
+
+**Structured output must be requested on every invocation.** The resume capture
+omitted `--json-schema` and returned `structured_output: null` with
+`is_error: false`. Nothing in the terminal event distinguishes "no structured
+output was requested" from "the provider failed to produce one", so an adapter
+that resumes without re-passing the schema receives an unclassifiable result.
+Re-pass the schema on every call, resume included.
+
+**Resume inherits the full maker context.** The resumed run answered from the
+prior session in a single turn, with no tool calls, recalling the exact edit,
+file path, and line position. That is the mechanical proof behind the Sprint 08
+invariant: a reviewer must never resume a maker session, because resume carries
+the maker's reasoning and conclusions with it. Reviewer runs take a fresh
+session against a read-only checkout, as `read_only_review_unit` already
+specifies.
+
 ## Capacity and reset timestamps
 
 Usage limits arrive as a distinct `rate_limit_event` with machine-readable
@@ -53,8 +76,10 @@ fields, observed here at `status: "allowed"`:
  "isUsingOverage": false}
 ```
 
-`resetsAt` is epoch seconds. This resolves the Sprint 00 question for Claude:
-reset timestamps are structured, not message-only. Codex is the opposite; see
+`resetsAt` is epoch seconds, and it advanced between the success and resume
+captures, so the window rolls rather than being pinned to a session. This
+resolves the Sprint 00 question for Claude: reset timestamps are structured, not
+message-only. Codex is the opposite; see
 [`codex-adapter-contract.md`](codex-adapter-contract.md). The two adapters must
 not share reset-time handling.
 
@@ -95,7 +120,6 @@ account charge, so it cannot be used to infer the billing path.
 
 ## Unknown / Unverified
 
-- Session resume is not captured; `claude-resume` remains `required`.
 - `rate_limited`, `quota_exhausted`, `context_exhausted`, and `output_limit`
   have no confirmed forcing mechanism that does not exhaust a real account.
 - `contract_invalid` cannot be reliably induced. Exercise it by mutating a
