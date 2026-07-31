@@ -1,7 +1,12 @@
 # systemd transient-runner contract
 
-**Status:** blocked; current host is macOS and has no `systemd-run`
+**Status:** superseded 2026-07-31 by
+[`harness-process-execution.md`](harness-process-execution.md)
 **Last checked:** 2026-07-29
+
+Spire no longer launches harness runs through systemd. Run supervision is
+portable and lives in the superseding record; this document is retained only as
+the history of the unproven transient-unit design. Do not implement from it.
 
 The current workstation cannot validate the production runner contract. The target
 VM must demonstrate the following before Sprint 05 starts.
