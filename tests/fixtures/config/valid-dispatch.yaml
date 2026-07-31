@@ -1,6 +1,10 @@
 # Synthetic configuration for offline parser and CLI tests. It is not a
 # deployment configuration and its provider model IDs are intentionally fake.
-schema_version: 1
+#
+# Kept in step with `SCHEMA_VERSION` and the `VALID_CONFIG` constant in
+# crates/spire-application/src/config.rs. `spire config validate` must accept
+# this file; crates/spire/tests/cli_smoke.rs enforces that.
+schema_version: 4
 linear:
   organization_id: org
   team_id: team
@@ -20,39 +24,22 @@ linear:
       repository: owner/spire
       enabled: true
 github:
-  repository: owner/repository
-  base_branch: main
-  required_checks: [test]
   installation_id: installation
   credential_ref: systemd:credentials/github-key
+  webhook_secret_ref: env:GITHUB_WEBHOOK_SECRET
+  request_timeout_seconds: 10
+  repositories:
+    - repository: owner/spire
+      base_branch: main
+      required_checks: [test]
+      workspace_root: /var/lib/spire/workspaces/owner-spire
 cloudflare:
   account_ref: account
   zone_ref: zone
   webhook_hostname: spire.example.test
 harnesses:
-  codex:
-    executable: codex
-    credential_ref: env:CODEX_TOKEN
-    models: [codex-model]
-    efforts: [medium]
-  claude-code:
-    executable: claude
-    credential_ref: env:CLAUDE_TOKEN
-    models: [claude-model]
-    efforts: [medium]
-dispatch:
-  policy_version: 1
-  rules:
-    - id: implementation
-      when: {role: implementation, complexity: [small, medium, large, xlarge]}
-      candidates:
-        - {harness: codex, model: codex-model, effort: medium}
-        - {harness: claude-code, model: claude-model, effort: medium}
-    - id: review
-      when: {role: review, complexity: [small, medium, large, xlarge]}
-      candidates:
-        - {harness: claude-code, model: claude-model, effort: medium}
-        - {harness: codex, model: codex-model, effort: medium}
+  maker: {provider: codex, model: codex-model, effort: medium}
+  reviewer: {provider: claude-code, model: claude-model, effort: medium}
 concurrency:
   total_active_harness_runs: 3
   ai_initiated_active_harness_runs: 1
@@ -73,6 +60,25 @@ runtime:
   evidence_root: /var/lib/spire/evidence
   implementation_timeout_seconds: 7200
   review_timeout_seconds: 1800
+operations:
+  minimum_free_disk_bytes: 10737418240
+  minimum_free_inodes: 10000
+  workspace_terminal_retention_seconds: 604800
+  evidence_terminal_retention_seconds: 604800
+  backup_retention_count: 7
+  backup_interval_seconds: 86400
 server:
   api_bind: 127.0.0.1:8080
   admin_bind: 127.0.0.1:8081
+webhook:
+  path: /webhooks/linear
+  signing_secret_ref: systemd:credentials/linear-webhook-secret
+  webhook_id: webhook
+  replay_window_seconds: 60
+  max_body_bytes: 262144
+rollout:
+  linear_writes_enabled: false
+  allowed_team_ids: []
+  allowed_repositories: []
+  allowed_type_labels: []
+  max_active_harness_runs: 1
