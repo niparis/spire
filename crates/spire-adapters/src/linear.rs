@@ -72,6 +72,7 @@ pub struct LinearReadAdapter {
     _sdk: LinearSdkClient,
     http: Client,
     token: String,
+    endpoint: String,
     diagnostic: std::sync::Mutex<LinearHealthDiagnostic>,
 }
 
@@ -93,6 +94,15 @@ impl LinearReadAdapter {
     /// Builds the read-only adapter from a credential obtained by a managed
     /// secret-store adapter. Callers must not log or persist the token.
     pub fn from_token(token: String) -> Result<Self, LinearAdapterError> {
+        Self::from_token_with_endpoint(token, ENDPOINT)
+    }
+
+    /// Test-only transport seam used to exercise request construction against a
+    /// local fixture server without changing the production endpoint.
+    pub fn from_token_with_endpoint(
+        token: String,
+        endpoint: impl Into<String>,
+    ) -> Result<Self, LinearAdapterError> {
         let sdk = LinearSdkClient::from_token(token.clone())
             .map_err(|_| LinearAdapterError::ClientConstruction)?;
         let http = Client::builder()
@@ -104,6 +114,7 @@ impl LinearReadAdapter {
             _sdk: sdk,
             http,
             token,
+            endpoint: endpoint.into(),
             diagnostic: std::sync::Mutex::new(LinearHealthDiagnostic {
                 configured: true,
                 last_rate_limit_remaining: None,
@@ -122,7 +133,7 @@ impl LinearReadAdapter {
     async fn request(&self, query: &str, variables: Value) -> Result<Value, LinearAdapterError> {
         let response = self
             .http
-            .post(ENDPOINT)
+            .post(&self.endpoint)
             // A Linear personal API key is sent raw. Wrapping it in `Bearer`
             // makes Linear reject the request with 400, not 401.
             .header(header::AUTHORIZATION, &self.token)
@@ -872,5 +883,53 @@ mod tests {
             let response = serde_json::json!({"errors":[{"extensions":{"code":code}}]});
             assert_eq!(normalize_viewer_probe(response), Err(expected));
         }
+    }
+
+    #[tokio::test]
+    async fn transport_sends_a_linear_personal_key_without_bearer() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let count = stream.read(&mut chunk).unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            let lower = request.to_ascii_lowercase();
+            assert!(
+                lower.contains("authorization: lin_api_test\r\n"),
+                "{request}"
+            );
+            assert!(!lower.contains("authorization: bearer"), "{request}");
+            let body = r#"{"data":{"viewer":{"id":"viewer-1","organization":{"id":"org-1"}}}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let adapter = LinearReadAdapter::from_token_with_endpoint(
+            "lin_api_test".to_owned(),
+            format!("http://{address}/graphql"),
+        )
+        .unwrap();
+        let identity = adapter.verify_viewer().await.unwrap();
+        assert_eq!(identity.viewer_id, "viewer-1");
+        server.join().unwrap();
     }
 }
