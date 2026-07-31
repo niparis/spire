@@ -20,10 +20,10 @@
     {
       "id": "claude-resume",
       "harness": "claude_code",
-      "capture_state": "required",
-      "normalized_outcome": "pr_ready",
-      "required_fields": ["terminal_event", "exit_status", "session_id", "structured_output"],
-      "redaction_confirmed": false
+      "capture_state": "captured",
+      "normalized_outcome": "no_change",
+      "required_fields": ["terminal_event", "exit_status", "session_id", "num_turns"],
+      "redaction_confirmed": true
     },
     {
       "id": "codex-quota-exhausted",
