@@ -8,7 +8,7 @@
 use std::{collections::BTreeSet, env, path::PathBuf, time::Duration};
 
 use lineark_sdk::Client as LinearSdkClient;
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, header};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use spire_application::{
@@ -123,7 +123,9 @@ impl LinearReadAdapter {
         let response = self
             .http
             .post(ENDPOINT)
-            .bearer_auth(&self.token)
+            // A Linear personal API key is sent raw. Wrapping it in `Bearer`
+            // makes Linear reject the request with 400, not 401.
+            .header(header::AUTHORIZATION, &self.token)
             .json(&json!({"query": query, "variables": variables}))
             .send()
             .await
