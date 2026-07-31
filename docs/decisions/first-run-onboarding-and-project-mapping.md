@@ -62,24 +62,35 @@ a foreground `spire serve` on macOS, per
 A hardened machine-wide installation with a dedicated service identity may be
 offered as an explicit advanced mode. It is not the default onboarding path.
 
-`spire init` is re-runnable and is the supported way to change any answer it
-collected. On a second run it loads the existing configuration, offers every
-previous answer as the default, and lets the operator revisit earlier answers
-before committing. It is a read-modify-write interview, not a write-once
-installer.
+`spire init` is a re-runnable configuration editor, not a write-once installer
+and not a questionnaire. It presents the configuration as a set of sections that
+may be visited in any order and any number of times. On a second run it loads the
+existing configuration, so every section opens already populated and the operator
+changes only what is wrong.
 
 Re-runnability is the editing interface promised by §2. Requiring an operator to
 hand-edit YAML to correct a single answer is not acceptable, and neither is
 refusing to run because a configuration already exists.
 
-Two properties hold on every run, first or subsequent:
+Because sections have no required order, ordering cannot carry correctness.
+Each section instead reports its own status — complete, incomplete, or
+invalidated by a change elsewhere — and the write is refused while any section is
+not complete. Refusal is the ordering mechanism.
 
-- **Nothing is written until the interview completes.** Init performs one atomic
-  configuration write at the end. An interrupted run leaves the installation
-  exactly as it found it, including on a re-run over an existing configuration.
-- **Every collected answer is recorded.** Init emits a structured trace of the
+Three properties hold on every run, first or subsequent:
+
+- **Nothing is written until the operator commits.** Init performs one atomic
+  configuration write. An abandoned session leaves the installation exactly as it
+  found it, including on a re-run over an existing configuration. This property
+  is currently violated by the credential and authentication-metadata stores,
+  which are written before the rest of the configuration is collected; Sprint 16
+  resolves the contradiction rather than restating it.
+- **A change never leaves a stale dependent behind.** A value derived from an
+  earlier choice is marked invalidated when that choice changes, and is visibly
+  so, rather than being silently carried into the written configuration.
+- **Every committed value is recorded.** Init emits a structured trace of the
   choices it made and the values it derived, so a later surprise can be traced
-  to the answer that caused it. The resulting configuration records outcomes;
+  to the decision that caused it. The resulting configuration records outcomes;
   the trace records decisions.
 
 `spire doctor` verifies the effective runtime context, not merely the interactive
@@ -225,7 +236,7 @@ carry a Spire lifecycle state, init offers to create one through
 `workflowStateCreate` under the identical rules: show the intended change,
 require confirmation, record a durable provisioning operation before delivery,
 and query existing states before creating on any retry. Forcing the operator out
-to the Linear UI mid-interview, then restarting init to pick the new state up, is
+to the Linear UI mid-session, then restarting init to pick the new state up, is
 not an acceptable alternative.
 
 Setup writes and runtime writes are distinct authorities and never share a gate:
@@ -234,7 +245,7 @@ Setup writes and runtime writes are distinct authorities and never share a gate:
 |---|---|---|
 | Examples | create a project, create a workflow state | transition an issue, post a comment |
 | Actor | the operator's own credential | the configured bot actor |
-| Gate | explicit per-action confirmation during the interview | `rollout.linear_writes_enabled` plus the allowlists |
+| Gate | explicit per-action confirmation during the session | `rollout.linear_writes_enabled` plus the allowlists |
 | Frequency | once, at setup | continuously, per ticket |
 
 Confirming a setup write must never enable runtime automation, and enabling
@@ -313,8 +324,10 @@ and webhooks.
 
 ## Architectural boundaries
 
-- Provider discovery and interactive prompting belong to CLI and provider
-  adapters.
+- Provider discovery, terminal rendering, and event handling belong to CLI and
+  provider adapters. The onboarding model, the status and invalidation rules, and
+  every derivation over them are pure and belong to the application core, so the
+  editor decides nothing.
 - Repository routing and admission rules belong to the application core.
 - SQLite adapters persist mappings and provisioning operations.
 - Git/worktree adapters implement the accepted
@@ -348,7 +361,7 @@ and webhooks.
   runtime user.
 - Linear project and workflow-state creation introduce an external-write crash
   window that requires provisioning reconciliation.
-- A re-runnable interview must read, present, and round-trip every value it once
+- A re-runnable editor must read, present, and round-trip every value it once
   wrote, so each new configuration field costs more than it did under a
   write-once installer.
 - The model catalog is a maintenance burden that goes stale on the provider's

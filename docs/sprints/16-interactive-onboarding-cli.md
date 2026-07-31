@@ -8,12 +8,31 @@
 
 ## Outcome
 
-An operator can re-run `spire init` to change any answer it previously
-collected, move backwards through the interview before committing, select a
-model from a shipped catalog instead of typing one, and provision a missing
-Linear workflow state without leaving the interview. Every answer is recorded in
-a structured trace, so a later surprise can be traced to the decision that caused
-it.
+`spire init` becomes a full-screen configuration editor rather than a
+questionnaire. An operator opens it on a fresh machine or on a configured one,
+moves between sections in any order, corrects a single wrong value without
+re-answering anything else, toggles multi-valued settings with space, and writes
+only when every section reports itself complete. Every committed value is
+recorded in a structured trace, so a later surprise can be traced to the decision
+that caused it.
+
+## The interaction model
+
+This sprint replaces a linear interview with a menu. The distinction is not
+cosmetic and it is the reason most of the packages below look different from a
+prompt-by-prompt plan:
+
+- **An interview enforces correctness through order.** Step 4 may assume step 3
+  answered. A menu has no order, so ordering is replaced by **continuously
+  recomputed per-section status**. This single substitution is the sprint's
+  central design move.
+- **An interview port is pull-based** — the application asks one question and
+  receives one answer. **A menu port is push-based** — the application hands over
+  a whole editable model and receives it back, mutated, on commit. The port must
+  be defined the second way.
+- **Invalidation becomes visible rather than procedural.** Changing the team does
+  not march the operator back through seven prompts. It marks the dependent
+  sections stale, states why, and refuses the write until they are revisited.
 
 ## Motivating evidence
 
@@ -62,172 +81,194 @@ No secret is accepted as a command-line argument.
 
 ## Work packages
 
-### S16.1 Separate prompting behind a port
+### S16.1 Define the editor port and its model
 
 The interview is currently unreachable from a test because it reads the terminal
-directly. Every later package in this sprint depends on removing that coupling.
+directly. Every later package depends on removing that coupling, and on removing
+it in the push-based direction.
 
 Implementation:
 
-1. Define a `PromptPort` in the application layer covering the interaction kinds
-   the interview uses: single choice from a list, free text, and confirmation.
-2. Move suggestion ranking, default selection, and answer validation behind that
-   port so they are pure and testable.
-3. Implement the terminal adapter in the CLI crate. Secret entry stays on the
-   existing no-echo path and never passes through a recorded prompt.
-4. Implement a scripted adapter for tests that replays a fixed answer sequence
-   and fails on an unexpected prompt.
+1. Define an `OnboardingModel` in the application layer holding every value the
+   configuration needs, each field independently optional and independently
+   invalidatable. This is the document the editor edits.
+2. Define an `OnboardingEditorPort` with essentially one operation: given a model
+   and the discovery data available, return either a committed model or a
+   cancellation. Do not define one method per question; that reintroduces the
+   pull-based interview behind a new name.
+3. Define a `DiscoveryRequest`/`DiscoveryResponse` channel contract so the editor
+   can ask for teams or a team configuration while remaining responsive. The
+   editor never calls Linear itself.
+4. Keep ranking, defaulting, derivation, and validation as pure functions over
+   the model in the application layer. The adapter renders and dispatches key
+   events; it decides nothing.
+5. Implement a headless adapter for tests that applies a scripted event sequence
+   and fails on an event the current screen cannot accept.
 
 Verification:
 
-- A complete interview runs end to end under the scripted adapter with no
-  terminal.
-- An answer sequence that ends early fails rather than silently accepting a
-  default.
-- The scripted adapter refuses to supply a secret.
+- A complete configuration is produced end to end under the headless adapter with
+  no terminal.
+- The application crate compiles with no terminal, rendering, or `crossterm`
+  dependency, and `./scripts/check-architecture.sh` passes.
+- Model validation is exercised directly, without constructing an editor.
 
-### S16.2 Make the interview navigable
+### S16.2 Build the full-screen editor
 
-This is the package that carries the sprint's risk. The other six add or move
-code; this one changes the interview from a straight line of seventeen blocking
-reads into a graph that can be walked backwards, and every ambiguity left here
-becomes a defect that only shows up when an operator revisits a step.
+This is the package that carries the sprint's risk. Every other package adds or
+moves code; this one introduces an event loop, an alternate screen, and raw mode
+into a binary that has never had any of them.
 
-#### The step sequence
+#### Layout
 
-The shipped interview is seventeen prompts in a fixed order. Naming them is part
-of the deliverable, because S16.7 asserts the sequence and a step that is not on
-this list cannot be tested for.
+A home screen lists the sections with a status marker each. Enter opens a
+section; Esc returns to the home screen. Sections may be opened in any order and
+any number of times.
 
-| # | Step | Kind | Answer |
-|---:|---|---|---|
-| 1 | Path preview | confirm | proceed or stop |
-| 2 | Linear credential | secret | API key |
-| 3 | Team | choice | team ID |
-| 4–10 | One per `LinearStateKind::ALL` | choice | workflow state ID |
-| 11 | Complexity mapping | confirm | accept the derived mapping |
-| 12 | Maker provider | choice | `HarnessId` |
-| 13 | Maker model | choice, S16.4 | `ModelId` |
-| 14 | Maker effort | choice | `Effort` |
-| 15 | Reviewer provider | choice | `HarnessId` |
-| 16 | Reviewer model | choice, S16.4 | `ModelId` |
-| 17 | Reviewer effort | choice | `Effort` |
-
-Steps 1 and 2 are outside the navigable region; see "Boundaries" below.
-
-#### The dependency graph
-
-Item 4 of a bare list would say "recompute dependents". The dependents have to be
-enumerated, because each edge is a separate way to write a configuration that
-references an object from a team the operator no longer selected.
-
-| Changing | Invalidates | Why |
+| Section | Contents | Status is complete when |
 |---|---|---|
-| Team (3) | Steps 4–10 | Workflow state IDs are team-scoped. A retained ID names a state on the old team. |
-| Team (3) | Step 11 | The complexity mapping is derived from that team's estimate scale, which differs per team and may be `notUsed`. |
-| Maker provider (12) | Step 13 | The model catalog is per-provider. |
-| Maker provider (12) | Steps 15–17 | The reviewer's option list excludes the maker's provider, so the previously confirmed reviewer may no longer be offered. |
-| Reviewer provider (15) | Step 16 | Same catalog scoping. |
+| Linear | credential state, selected team | a team is selected against a verified credential |
+| Workflow states | seven rows, one per `LinearStateKind::ALL` | all seven bind to a state on the selected team |
+| Complexity | estimate scale and the derived mapping | the scale is usable and the mapping is accepted |
+| Maker | provider, model, effort | all three set and the model is catalog-resolved or explicitly off-catalog |
+| Reviewer | provider, model, effort | as above, and the provider differs from the maker's |
+| Type labels | multi-select over the team's labels | at least one label selected |
+| Rollout | multi-select over teams for `rollout.allowed_team_ids` | optional; may be left empty while writes are disabled |
+| Paths | read-only preview of what will be written | always |
+| Review and write | every committed value, then the write | terminal action |
 
-An invalidated step is cleared, not silently re-answered. Nothing derived from a
-cleared step may reach `OnboardingAnswers`.
+The seven workflow-state rows are pre-filled from `rank_states` rather than
+asked one at a time. The operator overrides the rows that are wrong. This is the
+main ergonomic win over the shipped flow, which asks seven questions to change
+an average of one answer.
 
-#### Navigation rules
+#### Key contract
 
-1. Model the interview as an ordered sequence of steps, each holding its
-   question, its offered options, and its confirmed answer.
-2. Retain a revisited step's previous answer as its default rather than
-   discarding it. A stack that pops on back makes a one-key correction cost a
-   full re-entry, which is the pain this sprint exists to remove. Retention and
-   invalidation are different mechanisms: a step is cleared only when the
-   dependency table says so.
-3. Accept a back token at every navigable prompt and state it on the prompt line.
-   Undiscoverable navigation is not navigation.
-4. Reserve the back token from the answer space of every step that accepts free
-   text. The model step is the only one, and S16.4 makes it a choice list with an
-   explicit off-catalog escape, so the reserved token must be rejected as a model
-   ID rather than accepted as one.
-5. Back from the first navigable step exits the interview. It does not underflow
-   and does not silently do nothing.
-6. When an edit made from the review invalidates no dependent, return directly to
-   the review. When it invalidates dependents, walk forward through exactly the
-   cleared steps and then return to the review. Never replay steps that are still
-   valid.
-7. Cache each discovery response for the run, keyed by the input it was fetched
-   for. Revisiting the team step re-offers the cached team list; selecting a team
-   whose configuration was already fetched reuses it. A revisit must not become a
-   round trip, and the option list must not change under the operator mid-run.
-8. Step 11 currently dead-ends: declining the derived mapping aborts with advice
-   to edit a file that does not exist yet. Declining must instead route back to
-   the team step, since the estimate scale is a property of the team and there is
-   no other answer to change.
+6. `↑`/`↓` move, `Enter` opens or confirms, `Esc` goes back one level, `q` quits
+   from the home screen, `r` jumps to review.
+7. `Space` toggles membership in the multi-select sections. It has no meaning in
+   single-select lists and must not silently act as `Enter` there.
+8. Render the active key contract in a footer on every screen. An undiscoverable
+   binding is not a feature.
+9. `Esc` on the home screen is a quit confirmation, never a silent exit.
 
-#### The review
+#### Status, not order
 
-9. Present every answer the write will use, in step order, before any write.
-10. Show resolved names, not opaque identifiers. The configuration stores Linear
-    UUIDs; a review that prints them cannot be checked by the person reading it.
-11. Let any single step be selected from the review by its number.
-12. Make the write a distinct confirmation from the review itself, so reaching
-    the end of the interview is not the same act as committing it.
+10. Recompute every section's status after every model mutation. Correctness
+    comes from status, not from the order sections were visited.
+11. Give a section three distinguishable states — complete, incomplete, and
+    stale — and render stale differently from never-answered. Stale must state
+    what invalidated it.
+12. Apply these invalidation edges on mutation:
+
+| Changing | Marks stale | Why |
+|---|---|---|
+| Team | Workflow states | State IDs are team-scoped; a retained ID names a state on the old team. |
+| Team | Complexity | The mapping derives from that team's estimate scale, which differs per team and may be `notUsed`. |
+| Team | Type labels | Labels are team-scoped. |
+| Maker provider | Maker model | The catalog is per-provider. |
+| Maker provider | Reviewer | The reviewer's options exclude the maker's provider, so a confirmed reviewer may no longer be legal. |
+| Reviewer provider | Reviewer model | Same catalog scoping. |
+
+13. Retain the stale value and offer it as the default when the section is
+    reopened, unless it is no longer among the legal options. Discarding a value
+    the operator may want to re-confirm is the cost the shipped flow already
+    imposes.
+14. Refuse the write while any section is incomplete or stale, naming each one.
+    Refusal is the only ordering mechanism this design has.
+
+#### Asynchronous discovery
+
+15. Run Linear discovery on the Tokio runtime and deliver results to the editor
+    over a channel. A blocking network call inside the event loop freezes the
+    frame and is not acceptable.
+16. Render an explicit in-progress state for a section awaiting discovery, and
+    keep navigation and quit responsive while it is outstanding.
+17. Render a discovery failure inside the frame with a retry, rather than
+    unwinding the whole editor. A transient Linear error must not discard
+    collected work.
+18. Cache each discovery response for the run, keyed by the input it was fetched
+    for. Reselecting a previously fetched team must not issue a second request,
+    and the option lists must not shift under the operator mid-run.
+
+#### Terminal safety
+
+19. Install a panic hook that leaves the alternate screen and disables raw mode
+    before the panic message prints. Without it, any panic leaves the operator
+    with an unusable terminal and no visible error.
+20. Restore the terminal on every exit path, including `Esc` quit, discovery
+    failure, and error propagation out of `main`.
+21. Enter the alternate screen only after the terminal is confirmed usable.
+    Refuse with an actionable message when stdin is not a TTY, when `TERM` is
+    unset or `dumb`, or when the window is below the stated minimum size.
+22. Mask secret entry in the render buffer. Raw mode already suppresses echo, so
+    the risk moves from the terminal to the frame: the credential must never
+    enter a buffer that a test snapshot or a panic message could surface.
 
 #### Boundaries
 
-13. Steps 1 and 2 are not navigable. The preview confirmation precedes the
-    interview, and the credential is verified and stored before discovery can
-    run, so backing into it would mean unwinding a completed side effect.
-    Changing the credential is a re-run, not a back step.
-14. The claim in `crates/spire/src/init.rs` that an interrupted run "leaves the
+23. Multi-team ingestion is out of scope. `linear.team_id` is a single `String`
+    that filters the issue query, and both the state mapping and the complexity
+    mapping hang off that one team, so plural ingestion is a schema-5 change with
+    its own reconciliation work. The Rollout section's multi-select populates
+    `rollout.allowed_team_ids`, which is already a `Vec<String>` that init leaves
+    empty today, forcing a hand edit before writes can ever be enabled.
+24. The seven lifecycle states cannot be partially mapped. They are seven
+    required named fields on the configuration, not a map, so a state left
+    unbound has no representable value. Pre-filling and overriding replaces
+    partial selection.
+25. The claim in `crates/spire/src/init.rs` that an interrupted run "leaves the
     installation exactly as it found it" is already false: `authenticate` writes
-    the secret store and the authentication metadata store before step 3. Either
-    make the statement true by deferring those writes to the single commit point,
-    or correct the statement and the operator-facing message. Do not carry the
-    contradiction forward into a flow where interruption becomes common.
-15. `EOF` on stdin is the only interruption the interview currently handles.
-    `SIGINT` kills the process wherever it lands. State which of the two this
-    package covers rather than leaving the guarantee to depend on how the
-    operator quits.
+    the secret store and the authentication metadata store before any other
+    answer is collected. Either make it true by deferring those writes to the
+    single commit point, or correct the statement, the operator-facing message,
+    and the matching assertion in the decision record. Do not carry the
+    contradiction into a design where abandoning a session becomes routine.
+26. Raw mode delivers `Ctrl-C` as a key event rather than `SIGINT`, so the
+    editor owns the decision. Treat it as an abandon that restores the terminal
+    and writes nothing, and state that it is not a kill.
 
 Verification:
 
-- Going back to the team step and choosing a different team clears steps 4–11 and
-  re-collects them, rather than reusing state IDs from the old team.
-- Going back to the team step and reselecting the same team retains the existing
-  mapping as defaults and issues no new discovery request.
-- Choosing a maker provider that the reviewer already holds clears the reviewer
-  steps rather than producing a configuration where both roles share a provider.
-- Editing the maker effort from the review returns to the review without
-  re-asking the reviewer steps.
-- Back at step 3 exits the interview and writes no configuration.
-- The reserved back token is rejected as a model ID.
-- The review renders team, state, and model names; no answer is displayed only as
-  a UUID.
-- Declining at the review writes nothing and says so.
-- Interruption at any step, including inside the review, leaves the installation
-  in the state this package commits to in item 14, and a test asserts that state
+- The full editor runs under `TestBackend` with a synthetic key sequence, with
+  no terminal and no network.
+- Selecting a different team marks workflow states, complexity, and type labels
+  stale, and the write is refused while they are.
+- Reselecting the same team issues no second discovery request.
+- Choosing a maker provider the reviewer already holds marks the reviewer stale
+  rather than producing a configuration where both roles share a provider.
+- Editing the maker effort marks nothing else stale and leaves the write
+  available.
+- `Space` in a single-select list does not advance or confirm.
+- A panic raised mid-frame restores the terminal; a test asserts the hook runs.
+- A non-TTY, a `dumb` terminal, and an undersized window each fail with the
+  reason named, before the alternate screen is entered.
+- No rendered buffer in any test snapshot contains the credential sentinel.
+- Abandoning a session at any point, including with `Ctrl-C`, leaves the
+  installation in the state item 25 commits to, and a test asserts that state
   rather than the current unverified claim.
 
-### S16.3 Seed the interview from an existing configuration
+### S16.3 Seed the editor from an existing configuration
 
 Implementation:
 
-1. Load an existing configuration when one is present and use each value as the
-   default for its step.
+1. Load an existing configuration when one is present and use it to populate the
+   model, so every section opens already complete.
 2. Replace the refusal to run with a preview that names the file to be replaced
    and requires confirmation.
 3. Back up the existing configuration before replacing it, and leave the backup
    on failure.
-4. Preserve values the interview does not collect, including the unresolved
-   GitHub, Cloudflare, and webhook fields, so re-running never reintroduces a
-   placeholder over a resolved value.
-5. Report which values changed relative to the loaded configuration.
+4. Preserve values the editor does not expose, including the unresolved GitHub,
+   Cloudflare, and webhook fields, so re-running never reintroduces a placeholder
+   over a resolved value.
+5. Mark changed values in the review, relative to the loaded configuration.
 6. Keep the single atomic write. An interrupted re-run leaves the original
    configuration in place and unmodified.
 
 Verification:
 
-- Re-running and accepting every default produces a configuration equivalent to
-  the original.
+- Opening and immediately writing produces a configuration equivalent to the
+  original.
 - A resolved `github.installation_id` survives a re-run.
 - An interrupted re-run leaves the original file byte-identical.
 - The existing guard test is replaced by one asserting the backup-and-confirm
@@ -239,9 +280,9 @@ Implementation:
 
 1. Add a catalog data file listing known model identifiers per provider, loadable
    without rebuilding the binary.
-2. Offer the catalog entries for the selected provider as a choice list.
+2. Offer the catalog entries for the selected provider as the section's list.
 3. Accept a model outside the catalog through an explicit escape, record it, and
-   warn that it is unverified.
+   mark it unverified in the section and the review.
 4. Reject an empty model. Do not attempt to infer intent from the shape of the
    input; a syntactic guard cannot distinguish a retired model from a current
    one.
@@ -249,49 +290,54 @@ Implementation:
 
 Verification:
 
-- The model step cannot be satisfied by a menu index for a step that offered a
-  list.
-- An off-catalog model is accepted and marked unverified in the trace.
+- The model section offers only the selected provider's entries.
+- An off-catalog model is accepted and marked unverified in both the section and
+  the trace.
 - A missing or malformed catalog file fails at startup with the path named,
-  rather than silently offering nothing.
+  before the alternate screen is entered, rather than silently offering nothing.
 
 ### S16.5 Trace every onboarding decision
 
 Implementation:
 
-1. Emit a structured event for each confirmed answer carrying the step, the
-   chosen value, whether it was the suggested default, and whether it was
-   revisited.
-2. Emit an event for each derived value, including the complexity mapping and its
+1. Emit a structured event for each committed model mutation carrying the
+   section, the field, the new value, and whether it replaced a suggested
+   default.
+2. Emit an event for each invalidation, naming the mutation that caused it and
+   the sections marked stale.
+3. Emit an event for each derived value, including the complexity mapping and its
    source estimate scale.
-3. Emit an event for the write, naming the destination and the backup.
-4. Never emit a credential, a raw provider payload, or untrusted issue text.
-5. Document the redirect required to capture the trace on macOS, where no
-   supervisor collects stderr.
+4. Emit an event for the write, naming the destination and the backup.
+5. Never emit a credential, a raw provider payload, or untrusted issue text.
+6. Write the trace to a file rather than stderr. Stderr belongs to the alternate
+   screen for the duration of the editor, so the previously documented redirect
+   is no longer available.
 
 Verification:
 
-- A complete interview produces a trace from which every written value can be
+- A completed session produces a trace from which every written value can be
   explained.
 - Credential and untrusted-content sentinels never appear in the trace.
-- The trace is emitted for a failed run up to the point of failure.
+- The trace is emitted for an abandoned session up to the point it was abandoned.
+- Trace output never corrupts the rendered frame.
 
 ### S16.6 Provision a missing workflow state
 
 A team may have no state that can carry a Spire lifecycle state. Sending the
-operator to the Linear UI and requiring a restart of the interview is not an
-acceptable outcome.
+operator to the Linear UI and requiring a restart is not an acceptable outcome.
 
 Implementation:
 
-1. Detect a lifecycle state with no acceptable candidate and offer to create one.
+1. Detect a lifecycle row with no acceptable candidate and offer creation as an
+   action on that row.
 2. Show the exact proposed state, its category, and its target team.
 3. Require per-action confirmation. This confirmation authorizes one named
    change and nothing else.
 4. Record a durable provisioning operation before delivery, reusing the S15.6
    contract.
 5. Query existing states before creating on any retry.
-6. Re-read the team's states after creation rather than assuming the local shape.
+6. Re-read the team's states after creation rather than assuming the local shape,
+   and refresh the section from the re-read.
 
 Rules:
 
@@ -306,19 +352,20 @@ Rules:
 
 Verification:
 
-- Declining creation leaves the interview able to continue or stop cleanly.
+- Declining creation leaves the section usable and the editor running.
 - A crash between intent and response cannot produce two states on retry.
-- Permission failure maps no lifecycle state and writes no configuration.
+- Permission failure maps no lifecycle state, marks the section incomplete, and
+  writes no configuration.
 - A test asserts that the rollout gate is not read anywhere on this path.
 
-### S16.7 Cover the interview in tests
+### S16.7 Cover the editor in tests
 
 Implementation:
 
-1. Drive full interviews through the scripted prompt adapter against fixture
-   discovery data.
-2. Cover the first-run, re-run, back-navigation, changed-team, declined-write,
-   and interrupted paths.
+1. Drive full sessions through the headless adapter against fixture discovery
+   data, asserting on both the resulting model and the rendered buffer.
+2. Cover the first-run, re-run, invalidation, declined-write, discovery-failure,
+   and abandoned paths.
 3. Assert the resulting configuration parses and validates as expected for each.
 4. Add a transport-level test for the Linear adapter that asserts the outgoing
    request shape, including the authorization header, against a local HTTP
@@ -326,39 +373,41 @@ Implementation:
 
 Verification:
 
-- The interview suite runs without a terminal and without network access.
+- The suite runs without a terminal and without network access.
 - A change to the authorization header format fails a test.
-- Removing a step from the interview fails a test rather than silently
+- Removing a section from the editor fails a test rather than silently
   shortening the flow.
 
 ## Suggested pull-request slices
 
-1. `PromptPort`, the terminal and scripted adapters, and the interview test
-   harness.
-2. The step sequence, the back token, and dependent-step invalidation.
-3. The review, edit-from-review re-entry, and the interruption guarantee from
-   S16.2 item 14.
-4. Existing-configuration seeding, backup, and change reporting.
-5. Model catalog and decision trace.
-6. Workflow-state provisioning and the Linear transport test.
+1. `OnboardingModel`, `OnboardingEditorPort`, the pure status and invalidation
+   functions, and the headless adapter.
+2. The event loop, home screen, terminal guards, and panic-safe restoration —
+   with one section wired end to end.
+3. The remaining sections, including multi-select and pre-filled workflow states.
+4. Asynchronous discovery, caching, and in-frame failure handling.
+5. Existing-configuration seeding, backup, and change marking.
+6. Model catalog and decision trace.
+7. Workflow-state provisioning and the Linear transport test.
 
 ## Sprint demo
 
-Starting from the configuration written by the first live run, re-run
-`spire init`. Accept defaults through to the harness step, correct the model that
-was previously recorded as `1`, then go back and select a different team to show
-the state mapping being discarded and recollected. Return to the original team,
-reach the final review, and interrupt — showing the original configuration
-unchanged. Re-run, complete the write, and show the backup alongside a trace that
-explains every value in the new file. On a team missing a lifecycle state, create
-that state from inside the interview and show the provisioning operation, with
-rollout still disabled and no ticket admitted.
+Open `spire init` on the configuration written by the first live run. Every
+section shows complete. Open Maker, correct the model previously recorded as `1`
+from the catalog, and return. Open Linear, select a different team, and show
+workflow states, complexity, and type labels all marked stale with the reason,
+and the write refused. Return to the original team, show the retained values
+offered back, and complete the sections. Toggle type labels with space. Quit
+without writing and show the original configuration unchanged. Reopen, write, and
+show the backup alongside a trace explaining every value in the new file. On a
+team missing a lifecycle state, create that state from its row and show the
+provisioning operation, with rollout still disabled and no ticket admitted.
 
 ## Unknown / Unverified
 
-- Whether back-navigation is better served by a full-screen interface or by
-  in-line prompts is an implementation decision, and the dependency it adds
-  belongs to the CLI crate only.
+- The editor is a full-screen `ratatui` application on the alternate screen. The
+  rendering dependency belongs to the CLI crate only and must not reach the
+  application layer.
 - Codex exposes no model alias system and no model listing. Claude Code accepts
   stable aliases. The catalog's shape must accommodate both without implying the
   two providers offer equivalent guarantees.
@@ -368,3 +417,5 @@ rollout still disabled and no ticket admitted.
 - The Linear `workflowStateCreate` contract requires verification against the
   authenticated target workspace before S16.6 is implemented, in the same way
   `projectCreate` did for S15.7.
+- Whether the Linear label list needed by the Type labels section is returned by
+  the existing team-configuration query, or requires a new one, is unverified.
