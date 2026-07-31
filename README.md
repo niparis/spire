@@ -62,6 +62,7 @@ test "${actual_checksum}" = "${expected_checksum}"
 tar -xzf "${archive}"
 mkdir -p "$HOME/.local/bin"
 install -m 0755 spire "$HOME/.local/bin/spire"
+install -m 0644 model-catalog.yaml "$HOME/.local/bin/model-catalog.yaml"
 spire --version
 ```
 
@@ -77,12 +78,15 @@ To roll back, reinstall the prior approved tag and follow the
 
 ## First run
 
-`spire init` provisions a user installation interactively. It asks for a Linear
-API key, discovers the teams, workflow states, and estimate scale that key can
-see, and asks you to confirm every mapping it suggests. Nothing is written until
-the last answer is given; the configuration is then created in one atomic write.
-An interrupted run leaves the installation untouched and is restarted, not
-resumed.
+`spire init` opens a re-runnable full-screen editor. It asks for a Linear API key,
+discovers the teams, workflow states, and estimate scale that key can see, and
+lets you revisit any section before committing. Nothing is written until the
+review is complete; a rerun preserves fields the editor does not own, backs up
+the previous configuration, and records decisions in the onboarding trace.
+Abandoning a run leaves the installation untouched.
+
+The release model catalog is installed beside the binary. Set
+`SPIRE_MODEL_CATALOG` to use a reviewed catalog at another path.
 
 ```sh
 spire init

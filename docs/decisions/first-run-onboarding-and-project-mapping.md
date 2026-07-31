@@ -80,11 +80,11 @@ not complete. Refusal is the ordering mechanism.
 Three properties hold on every run, first or subsequent:
 
 - **Nothing is written until the operator commits.** Init performs one atomic
-  configuration write. An abandoned session leaves the installation exactly as it
-  found it, including on a re-run over an existing configuration. This property
-  is currently violated by the credential and authentication-metadata stores,
-  which are written before the rest of the configuration is collected; Sprint 16
-  resolves the contradiction rather than restating it.
+  configuration replacement and defers new credential and authentication-metadata
+  writes until that commit path. An abandoned session leaves the installation
+  exactly as it found it, including on a re-run over an existing configuration.
+  A re-run keeps the prior configuration backup beside the replacement, and a
+  failure after replacement restores the original while retaining that backup.
 - **A change never leaves a stale dependent behind.** A value derived from an
   earlier choice is marked invalidated when that choice changes, and is visibly
   so, rather than being silently carried into the written configuration.
