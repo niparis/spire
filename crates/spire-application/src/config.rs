@@ -102,6 +102,8 @@ pub struct HarnessRolesConfig {
     pub maker: HarnessRoleConfig,
     pub reviewer: HarnessRoleConfig,
     #[serde(default)]
+    pub catalog_version: Option<String>,
+    #[serde(default)]
     pub advanced: BTreeMap<HarnessId, AdvancedHarnessConfig>,
 }
 
