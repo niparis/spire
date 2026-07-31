@@ -112,30 +112,37 @@ enum Command {
         #[command(subcommand)]
         command: ProjectsCommand,
     },
+    #[command(hide = true)]
     Dispatch {
         #[command(subcommand)]
         command: DispatchCommand,
     },
+    #[command(hide = true)]
     Db {
         #[command(subcommand)]
         command: DbCommand,
     },
+    #[command(hide = true)]
     Ops {
         #[command(subcommand)]
         command: OpsCommand,
     },
+    #[command(hide = true)]
     Linear {
         #[command(subcommand)]
         command: LinearCommand,
     },
+    #[command(hide = true)]
     GitHub {
         #[command(subcommand)]
         command: GitHubCommand,
     },
+    #[command(hide = true)]
     Scheduler {
         #[command(subcommand)]
         command: SchedulerCommand,
     },
+    #[command(hide = true)]
     Runs {
         #[command(subcommand)]
         command: RunsCommand,
@@ -243,16 +250,19 @@ enum ProjectsCommand {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
+    #[command(hide = true)]
     Doctor {
         #[arg(long)]
         mapping_id: Option<String>,
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
+    #[command(hide = true)]
     Preflight {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
     },
+    #[command(hide = true)]
     Reconcile {
         #[arg(long, default_value = "text")]
         format: OutputFormat,
