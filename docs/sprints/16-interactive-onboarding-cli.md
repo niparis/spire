@@ -88,26 +88,124 @@ Verification:
 
 ### S16.2 Make the interview navigable
 
-Implementation:
+This is the package that carries the sprint's risk. The other six add or move
+code; this one changes the interview from a straight line of seventeen blocking
+reads into a graph that can be walked backwards, and every ambiguity left here
+becomes a defect that only shows up when an operator revisits a step.
 
-1. Model the interview as an ordered sequence of steps holding the question, the
-   offered options, and the confirmed answer.
-2. Keep confirmed answers on a stack so a step can be revisited.
-3. Accept a documented back token at every prompt, and state it in the prompt
-   line rather than leaving it undiscoverable.
-4. Recompute every dependent step when an earlier answer changes. Changing the
-   team invalidates the state mapping, the complexity mapping, and any answer
-   derived from the estimate scale.
-5. Present a final review of every answer before the write, with a way back into
-   any single step.
-6. Never carry a stale derived answer past the step that invalidated it.
+#### The step sequence
+
+The shipped interview is seventeen prompts in a fixed order. Naming them is part
+of the deliverable, because S16.7 asserts the sequence and a step that is not on
+this list cannot be tested for.
+
+| # | Step | Kind | Answer |
+|---:|---|---|---|
+| 1 | Path preview | confirm | proceed or stop |
+| 2 | Linear credential | secret | API key |
+| 3 | Team | choice | team ID |
+| 4–10 | One per `LinearStateKind::ALL` | choice | workflow state ID |
+| 11 | Complexity mapping | confirm | accept the derived mapping |
+| 12 | Maker provider | choice | `HarnessId` |
+| 13 | Maker model | choice, S16.4 | `ModelId` |
+| 14 | Maker effort | choice | `Effort` |
+| 15 | Reviewer provider | choice | `HarnessId` |
+| 16 | Reviewer model | choice, S16.4 | `ModelId` |
+| 17 | Reviewer effort | choice | `Effort` |
+
+Steps 1 and 2 are outside the navigable region; see "Boundaries" below.
+
+#### The dependency graph
+
+Item 4 of a bare list would say "recompute dependents". The dependents have to be
+enumerated, because each edge is a separate way to write a configuration that
+references an object from a team the operator no longer selected.
+
+| Changing | Invalidates | Why |
+|---|---|---|
+| Team (3) | Steps 4–10 | Workflow state IDs are team-scoped. A retained ID names a state on the old team. |
+| Team (3) | Step 11 | The complexity mapping is derived from that team's estimate scale, which differs per team and may be `notUsed`. |
+| Maker provider (12) | Step 13 | The model catalog is per-provider. |
+| Maker provider (12) | Steps 15–17 | The reviewer's option list excludes the maker's provider, so the previously confirmed reviewer may no longer be offered. |
+| Reviewer provider (15) | Step 16 | Same catalog scoping. |
+
+An invalidated step is cleared, not silently re-answered. Nothing derived from a
+cleared step may reach `OnboardingAnswers`.
+
+#### Navigation rules
+
+1. Model the interview as an ordered sequence of steps, each holding its
+   question, its offered options, and its confirmed answer.
+2. Retain a revisited step's previous answer as its default rather than
+   discarding it. A stack that pops on back makes a one-key correction cost a
+   full re-entry, which is the pain this sprint exists to remove. Retention and
+   invalidation are different mechanisms: a step is cleared only when the
+   dependency table says so.
+3. Accept a back token at every navigable prompt and state it on the prompt line.
+   Undiscoverable navigation is not navigation.
+4. Reserve the back token from the answer space of every step that accepts free
+   text. The model step is the only one, and S16.4 makes it a choice list with an
+   explicit off-catalog escape, so the reserved token must be rejected as a model
+   ID rather than accepted as one.
+5. Back from the first navigable step exits the interview. It does not underflow
+   and does not silently do nothing.
+6. When an edit made from the review invalidates no dependent, return directly to
+   the review. When it invalidates dependents, walk forward through exactly the
+   cleared steps and then return to the review. Never replay steps that are still
+   valid.
+7. Cache each discovery response for the run, keyed by the input it was fetched
+   for. Revisiting the team step re-offers the cached team list; selecting a team
+   whose configuration was already fetched reuses it. A revisit must not become a
+   round trip, and the option list must not change under the operator mid-run.
+8. Step 11 currently dead-ends: declining the derived mapping aborts with advice
+   to edit a file that does not exist yet. Declining must instead route back to
+   the team step, since the estimate scale is a property of the team and there is
+   no other answer to change.
+
+#### The review
+
+9. Present every answer the write will use, in step order, before any write.
+10. Show resolved names, not opaque identifiers. The configuration stores Linear
+    UUIDs; a review that prints them cannot be checked by the person reading it.
+11. Let any single step be selected from the review by its number.
+12. Make the write a distinct confirmation from the review itself, so reaching
+    the end of the interview is not the same act as committing it.
+
+#### Boundaries
+
+13. Steps 1 and 2 are not navigable. The preview confirmation precedes the
+    interview, and the credential is verified and stored before discovery can
+    run, so backing into it would mean unwinding a completed side effect.
+    Changing the credential is a re-run, not a back step.
+14. The claim in `crates/spire/src/init.rs` that an interrupted run "leaves the
+    installation exactly as it found it" is already false: `authenticate` writes
+    the secret store and the authentication metadata store before step 3. Either
+    make the statement true by deferring those writes to the single commit point,
+    or correct the statement and the operator-facing message. Do not carry the
+    contradiction forward into a flow where interruption becomes common.
+15. `EOF` on stdin is the only interruption the interview currently handles.
+    `SIGINT` kills the process wherever it lands. State which of the two this
+    package covers rather than leaving the guarantee to depend on how the
+    operator quits.
 
 Verification:
 
-- Going back to the team step and choosing a different team discards the
-  previous state mapping rather than reusing state IDs from the old team.
-- The final review lists every answer the write will use.
-- Interruption at any step, including inside the review, writes nothing.
+- Going back to the team step and choosing a different team clears steps 4–11 and
+  re-collects them, rather than reusing state IDs from the old team.
+- Going back to the team step and reselecting the same team retains the existing
+  mapping as defaults and issues no new discovery request.
+- Choosing a maker provider that the reviewer already holds clears the reviewer
+  steps rather than producing a configuration where both roles share a provider.
+- Editing the maker effort from the review returns to the review without
+  re-asking the reviewer steps.
+- Back at step 3 exits the interview and writes no configuration.
+- The reserved back token is rejected as a model ID.
+- The review renders team, state, and model names; no answer is displayed only as
+  a UUID.
+- Declining at the review writes nothing and says so.
+- Interruption at any step, including inside the review, leaves the installation
+  in the state this package commits to in item 14, and a test asserts that state
+  rather than the current unverified claim.
 
 ### S16.3 Seed the interview from an existing configuration
 
@@ -237,10 +335,12 @@ Verification:
 
 1. `PromptPort`, the terminal and scripted adapters, and the interview test
    harness.
-2. Navigation, dependent-step invalidation, and the final review.
-3. Existing-configuration seeding, backup, and change reporting.
-4. Model catalog and decision trace.
-5. Workflow-state provisioning and the Linear transport test.
+2. The step sequence, the back token, and dependent-step invalidation.
+3. The review, edit-from-review re-entry, and the interruption guarantee from
+   S16.2 item 14.
+4. Existing-configuration seeding, backup, and change reporting.
+5. Model catalog and decision trace.
+6. Workflow-state provisioning and the Linear transport test.
 
 ## Sprint demo
 
