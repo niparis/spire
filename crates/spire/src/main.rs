@@ -132,7 +132,7 @@ enum Command {
         #[command(subcommand)]
         command: LinearCommand,
     },
-    #[command(hide = true)]
+    #[command(name = "github", hide = true)]
     GitHub {
         #[command(subcommand)]
         command: GitHubCommand,
