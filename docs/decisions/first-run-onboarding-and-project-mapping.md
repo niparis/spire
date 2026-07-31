@@ -1,8 +1,13 @@
 # First-run onboarding and Linear project mapping
 
-**Status:** accepted; implementation planned in Sprints 12–15
+**Status:** accepted; revised 2026-07-31 after the first live `spire init` run
 **Decision owner:** product owner
-**Last checked:** 2026-07-29
+**Last checked:** 2026-07-31
+
+The 2026-07-31 revision changes §1 (init is re-runnable and seeds from the
+existing configuration), makes the model validation in §4 concrete, and extends
+the §5 provisioning-write contract from projects to workflow states. Everything
+else stands as originally accepted.
 
 ## Context
 
@@ -41,7 +46,6 @@ spire start
 
 - uses the invoking login user as the default runtime identity;
 - creates user-scoped configuration, data, and evidence locations;
-- installs or generates the supported user-level service definition;
 - discovers Linear organizations, teams, workflow states, estimate scales, and
   existing webhooks through authenticated read APIs;
 - detects Git, GitHub, Codex, and Claude Code executables and authentication state;
@@ -50,8 +54,44 @@ spire start
 - initializes SQLite; and
 - leaves production automation disabled.
 
+Init does not install a service. Service installation is a separate,
+platform-dependent step: `spire service install` where a supervisor exists, and
+a foreground `spire serve` on macOS, per
+[`harness-process-execution.md`](harness-process-execution.md).
+
 A hardened machine-wide installation with a dedicated service identity may be
 offered as an explicit advanced mode. It is not the default onboarding path.
+
+`spire init` is a re-runnable configuration editor, not a write-once installer
+and not a questionnaire. It presents the configuration as a set of sections that
+may be visited in any order and any number of times. On a second run it loads the
+existing configuration, so every section opens already populated and the operator
+changes only what is wrong.
+
+Re-runnability is the editing interface promised by §2. Requiring an operator to
+hand-edit YAML to correct a single answer is not acceptable, and neither is
+refusing to run because a configuration already exists.
+
+Because sections have no required order, ordering cannot carry correctness.
+Each section instead reports its own status — complete, incomplete, or
+invalidated by a change elsewhere — and the write is refused while any section is
+not complete. Refusal is the ordering mechanism.
+
+Three properties hold on every run, first or subsequent:
+
+- **Nothing is written until the operator commits.** Init performs one atomic
+  configuration write. An abandoned session leaves the installation exactly as it
+  found it, including on a re-run over an existing configuration. This property
+  is currently violated by the credential and authentication-metadata stores,
+  which are written before the rest of the configuration is collected; Sprint 16
+  resolves the contradiction rather than restating it.
+- **A change never leaves a stale dependent behind.** A value derived from an
+  earlier choice is marked invalidated when that choice changes, and is visibly
+  so, rather than being silently carried into the written configuration.
+- **Every committed value is recorded.** Init emits a structured trace of the
+  choices it made and the values it derived, so a later surprise can be traced
+  to the decision that caused it. The resulting configuration records outcomes;
+  the trace records decisions.
 
 `spire doctor` verifies the effective runtime context, not merely the interactive
 shell. It checks configuration, database access, provider authentication,
@@ -131,6 +171,24 @@ harnesses:
 The maker and reviewer providers must differ. `spire init` probes or asks for
 supported provider, model, and effort values and validates the resulting pair.
 
+Model is never collected as unvalidated free text. Neither Codex nor Claude Code
+exposes a machine-readable model list, so Spire ships a **model catalog**: a
+data file, editable without rebuilding, listing the known model identifiers for
+each provider. Init offers that catalog as a selection.
+
+The catalog is a convenience, not an authority. It goes stale the moment a
+provider ships a model, so:
+
+- an operator may supply a model outside the catalog, and Spire records it; and
+- once the harness execution path can spawn a provider process, init
+  **probes** the selected model and reports failure at setup time rather than
+  at first dispatch.
+
+The probe, not the catalog, is the real check. A catalog alone cannot detect its
+own staleness, and a purely syntactic guard cannot tell a retired model from a
+current one. Until the probe exists, an off-catalog model is accepted with a
+recorded warning.
+
 This simpler interface does not weaken the versioned dispatch contract. Spire
 compiles the selections into a complete versioned dispatch policy, evaluates it
 against normalized Linear complexity, and persists the effective
@@ -173,6 +231,32 @@ A retry must query existing projects before creating another. If Spire cannot
 unambiguously reconcile a prior attempt, it stops for operator selection rather
 than creating a possible duplicate.
 
+The same contract governs **workflow states**. When a team has no state that can
+carry a Spire lifecycle state, init offers to create one through
+`workflowStateCreate` under the identical rules: show the intended change,
+require confirmation, record a durable provisioning operation before delivery,
+and query existing states before creating on any retry. Forcing the operator out
+to the Linear UI mid-session, then restarting init to pick the new state up, is
+not an acceptable alternative.
+
+Setup writes and runtime writes are distinct authorities and never share a gate:
+
+| | Setup provisioning write | Runtime ticket write |
+|---|---|---|
+| Examples | create a project, create a workflow state | transition an issue, post a comment |
+| Actor | the operator's own credential | the configured bot actor |
+| Gate | explicit per-action confirmation during the session | `rollout.linear_writes_enabled` plus the allowlists |
+| Frequency | once, at setup | continuously, per ticket |
+
+Confirming a setup write must never enable runtime automation, and enabling
+runtime automation must never authorize schema changes to the workspace. An
+implementation that satisfies one gate by consulting the other is wrong.
+
+Because a setup write is performed with the operator's own credential, Linear
+attributes it to that person rather than to the bot. That is acceptable for
+one-time provisioning and is the reason the two authorities are separated rather
+than merged into a single Linear write capability.
+
 The same command supports existing projects, either interactively or through an
 explicit option:
 
@@ -182,6 +266,12 @@ spire new . --linear-project existing
 
 Exact final command names and flags may be refined for consistency before
 implementation, but the create-or-map behavior is binding.
+
+As implemented, the mapping half of this command is spelled
+`spire projects map --linear-project-id <ID> --repository-source <PATH>`. There
+is no `spire new`; the local-repository registration and project-creation steps
+above are not yet built. This paragraph exists because the unimplemented `spire
+new` spelling has already been mistaken for a shipped command.
 
 ### 6. Project-to-repository mappings live in SQLite
 
@@ -234,8 +324,10 @@ and webhooks.
 
 ## Architectural boundaries
 
-- Provider discovery and interactive prompting belong to CLI and provider
-  adapters.
+- Provider discovery, terminal rendering, and event handling belong to CLI and
+  provider adapters. The onboarding model, the status and invalidation rules, and
+  every derivation over them are pure and belong to the application core, so the
+  editor decides nothing.
 - Repository routing and admission rules belong to the application core.
 - SQLite adapters persist mappings and provisioning operations.
 - Git/worktree adapters implement the accepted
@@ -267,8 +359,13 @@ and webhooks.
   target, including logout and reboot.
 - Provider-native harness authentication is only as isolated as the selected
   runtime user.
-- Linear project creation introduces an external-write crash window that requires
-  provisioning reconciliation.
+- Linear project and workflow-state creation introduce an external-write crash
+  window that requires provisioning reconciliation.
+- A re-runnable editor must read, present, and round-trip every value it once
+  wrote, so each new configuration field costs more than it did under a
+  write-once installer.
+- The model catalog is a maintenance burden that goes stale on the provider's
+  schedule rather than ours, and it remains wrong until the probe lands.
 - Existing label-based repository mappings require a forward migration into
   SQLite.
 

@@ -64,6 +64,7 @@ flowchart LR
     S12 --> S13["Sprint 13<br/>Auth and diagnostics"]
     S13 --> S14["Sprint 14<br/>Project routing and worktrees"]
     S14 --> S15["Sprint 15<br/>Guided onboarding"]
+    S15 --> S16["Sprint 16<br/>Interactive onboarding CLI"]
 ```
 
 | Sprint | Outcome | Production writes enabled? |
@@ -84,6 +85,7 @@ flowchart LR
 | [13 — Authentication and diagnostics](13-authentication-and-diagnostics.md) | Managed service auth and provider-native harness/Git/SSH diagnosis | Authentication only |
 | [14 — Durable project routing and worktree sources](14-durable-project-routing.md) | SQLite-backed project routing and Git-aware worktree ownership | No |
 | [15 — Guided onboarding and project provisioning](15-guided-onboarding-and-project-provisioning.md) | Resumable `spire init`/`spire new` and controlled Linear project creation | Linear setup only |
+| [16 — Interactive onboarding CLI](16-interactive-onboarding-cli.md) | Re-runnable, navigable `spire init` with a model catalog and traced decisions | Linear setup only |
 
 ## Shared Definition of Done
 
