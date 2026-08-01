@@ -221,6 +221,8 @@ impl FreshReviewContext {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use spire_domain::{
         ComplexityClass, DispatchCandidate, DispatchPolicy, DispatchPolicyVersion, DispatchRule,
@@ -301,16 +303,15 @@ mod tests {
             effort: Effort::High,
         };
         let mut capabilities = HarnessCapabilityRegistry::default();
-        capabilities.register(
-            codex.clone(),
-            [ModelId::new("model").unwrap()],
-            [Effort::High],
-        );
-        capabilities.register(
-            claude.clone(),
-            [ModelId::new("model").unwrap()],
-            [Effort::High],
-        );
+        for harness in [codex.clone(), claude.clone()] {
+            capabilities.register(
+                harness,
+                [(
+                    ModelId::new("model").unwrap(),
+                    BTreeSet::from([Effort::High]),
+                )],
+            );
+        }
         let policy = DispatchPolicy {
             policy_version: DispatchPolicyVersion::new(1).unwrap(),
             rules: vec![

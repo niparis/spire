@@ -124,51 +124,52 @@ pub async fn run(paths: ResolvedPaths, credential_file: Option<PathBuf>) -> Resu
 
 fn seed_default_harnesses(
     model: &mut OnboardingModel,
-    catalog: &onboarding_editor::ModelCatalog,
+    catalog: &spire_application::ModelCatalog,
 ) -> Result<()> {
-    if model.maker.value.is_none() {
-        let provider = spire_domain::HarnessId::new("codex")?;
-        let model_id = catalog
-            .models_for(&provider)
-            .into_iter()
-            .next()
-            .context("model catalog has no codex model")?;
-        model.maker.value = Some(spire_application::HarnessSelection {
-            provider,
-            model: model_id,
-            effort: spire_domain::Effort::High,
-        });
-        model.maker_model_confirmed = true;
-    }
-    if model.reviewer.value.is_none() {
-        let provider = spire_domain::HarnessId::new("claude-code")?;
-        let model_id = catalog
-            .models_for(&provider)
-            .into_iter()
-            .next()
-            .context("model catalog has no claude-code model")?;
-        model.reviewer.value = Some(spire_application::HarnessSelection {
-            provider,
-            model: model_id,
-            effort: spire_domain::Effort::High,
-        });
-        model.reviewer_model_confirmed = true;
-    }
-    let maker_off_catalog = model.maker.value.as_ref().is_some_and(|selection| {
-        !catalog
-            .models_for(&selection.provider)
-            .contains(&selection.model)
-    });
-    let reviewer_off_catalog = model.reviewer.value.as_ref().is_some_and(|selection| {
-        !catalog
-            .models_for(&selection.provider)
-            .contains(&selection.model)
-    });
-    if maker_off_catalog {
-        model.set_model_catalog_state(spire_application::OnboardingRole::Maker, true);
-    }
-    if reviewer_off_catalog {
-        model.set_model_catalog_state(spire_application::OnboardingRole::Reviewer, true);
+    for (role, provider) in [
+        (spire_application::OnboardingRole::Maker, "codex"),
+        (spire_application::OnboardingRole::Reviewer, "claude-code"),
+    ] {
+        let seeded = match role {
+            spire_application::OnboardingRole::Maker => model.maker.value.is_none(),
+            spire_application::OnboardingRole::Reviewer => model.reviewer.value.is_none(),
+        };
+        if seeded {
+            let provider = spire_domain::HarnessId::new(provider)?;
+            let model_id = catalog
+                .models_for(&provider)
+                .into_iter()
+                .next()
+                .with_context(|| format!("model catalog has no {provider} model"))?;
+            let selection = spire_application::HarnessSelection {
+                effort: catalog.default_effort_for(&provider, &model_id),
+                provider,
+                model: model_id,
+            };
+            match role {
+                spire_application::OnboardingRole::Maker => {
+                    model.maker.value = Some(selection);
+                    model.maker_model_confirmed = true;
+                }
+                spire_application::OnboardingRole::Reviewer => {
+                    model.reviewer.value = Some(selection);
+                    model.reviewer_model_confirmed = true;
+                }
+            }
+        }
+
+        let selection = match role {
+            spire_application::OnboardingRole::Maker => model.maker.value.clone(),
+            spire_application::OnboardingRole::Reviewer => model.reviewer.value.clone(),
+        };
+        let Some(selection) = selection else { continue };
+        let off_catalog = catalog
+            .entry(&selection.provider, &selection.model)
+            .is_none();
+        model.set_model_catalog_state(role, off_catalog);
+        // An existing config may name an effort the catalog no longer grants
+        // this model; re-applying the model surfaces that as an invalidation.
+        model.set_model(role, selection.model, catalog);
     }
     Ok(())
 }

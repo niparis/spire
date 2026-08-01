@@ -2,7 +2,7 @@
 
 **Status:** contract defined; concrete provider capabilities blocked
 **Policy version:** 1
-**Last checked:** 2026-07-29
+**Last checked:** 2026-08-01
 
 Version 1 matches only `role` and normalized `complexity`. It never accepts a
 harness, model, or effort from a Linear ticket. The effective policy must be
@@ -35,6 +35,11 @@ explicit—there are no defaults.
 - Schema 4 role configuration generates one deterministic all-complexity rule
   per role. Advanced configuration may replace this with exact rules and ordered
   fallback candidates, subject to the same coverage and separation validation.
+- Capability is declared per model, not per harness. `HarnessCapabilityRegistry`
+  holds an effort set for each model, and `harnesses.advanced.<provider>.models`
+  is a mapping from model to efforts. Two independent lists would form a cross
+  product and approve a pair the provider rejects — a model with a lower
+  reasoning ceiling would inherit a level only its sibling accepts.
 
 ## Acceptance checklist for the concrete policy
 

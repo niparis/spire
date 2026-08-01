@@ -6,7 +6,7 @@
 //! so a slow provider cannot hold a terminal frame hostage.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     env,
     fs::{self, OpenOptions},
     io::{self, IsTerminal, Write},
@@ -28,16 +28,19 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use spire_adapters::linear::LinearReadAdapter;
 use spire_application::{
     DiscoveryRequest, DiscoveryResponse, Editable, LinearOnboardingDiscoveryPort, LinearStateKind,
-    LinearTeamConfiguration, MutationOutcome, OnboardingDiscovery, OnboardingEditorPort,
-    OnboardingEditorResult, OnboardingModel, OnboardingRole, OnboardingSection, SectionStatus,
-    rank_states, suggest_complexity_mapping,
+    LinearTeamConfiguration, ModelCatalog, MutationOutcome, OnboardingDiscovery,
+    OnboardingEditorPort, OnboardingEditorResult, OnboardingModel, OnboardingRole,
+    OnboardingSection, SectionStatus, rank_states, suggest_complexity_mapping,
 };
 use spire_domain::{HarnessId, ModelId};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+
+#[cfg(test)]
+use std::collections::BTreeMap;
 
 #[cfg(test)]
 use ratatui::{backend::TestBackend, buffer::Buffer};
@@ -47,23 +50,6 @@ use spire_application::HeadlessEvent;
 pub const MIN_TERMINAL_COLUMNS: u16 = 80;
 pub const MIN_TERMINAL_ROWS: u16 = 24;
 pub const DEFAULT_CATALOG_FILE: &str = "model-catalog.yaml";
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ModelCatalog {
-    pub version: String,
-    pub providers: BTreeMap<String, Vec<String>>,
-}
-
-impl ModelCatalog {
-    pub fn models_for(&self, provider: &HarnessId) -> Vec<ModelId> {
-        self.providers
-            .get(provider.as_str())
-            .into_iter()
-            .flatten()
-            .filter_map(|model| ModelId::new(model.clone()).ok())
-            .collect()
-    }
-}
 
 pub fn load_model_catalog(path: &Path) -> Result<ModelCatalog> {
     let contents = fs::read_to_string(path)
@@ -83,14 +69,21 @@ pub fn load_model_catalog(path: &Path) -> Result<ModelCatalog> {
                 path.display()
             )
         }
-        for model in models {
-            ModelId::new(model.clone()).map_err(|error| {
+        for entry in models {
+            ModelId::new(entry.id.clone()).map_err(|error| {
                 anyhow::anyhow!(
                     "model catalog {} contains an invalid model for {}: {error}",
                     path.display(),
                     provider
                 )
             })?;
+            if !entry.efforts.contains(&entry.default_effort) {
+                bail!(
+                    "model catalog {} gives {} a default effort outside its own effort list",
+                    path.display(),
+                    entry.id
+                )
+            }
         }
     }
     Ok(catalog)
@@ -837,18 +830,15 @@ impl EditorSession {
             KeyCode::Char('o') | KeyCode::Char('O') if self.section_index == 1 => {
                 match prompt_off_catalog_model() {
                     Ok(model) => {
-                        selection.model = model;
                         self.model.set_model_catalog_state(role, true);
-                        if role == OnboardingRole::Maker {
-                            self.model.set_maker(selection.clone());
-                        } else {
-                            self.model.set_reviewer(selection.clone());
-                        }
+                        let chosen = model.to_string();
+                        let outcome = self.model.set_model(role, model, &self.catalog);
+                        let _ = self.trace.invalidation(&outcome);
                         let _ = self.trace.mutation(
                             section.as_str(),
                             "model",
                             serde_json::json!({
-                                "model": selection.model.as_str(),
+                                "model": chosen,
                                 "catalog_resolution": "off_catalog",
                             }),
                             false,
@@ -883,34 +873,33 @@ impl EditorSession {
                 }
             }
             KeyCode::Enter if self.section_index == 1 => {
-                let models = self.catalog.models_for(&selection.provider);
-                if let Some(model) = models.first() {
-                    selection.model = model.clone();
+                if let Some(model) = self
+                    .catalog
+                    .next_model(&selection.provider, &selection.model)
+                {
                     self.model.set_model_catalog_state(role, false);
-                    if role == OnboardingRole::Maker {
-                        self.model.set_maker(selection.clone());
-                    } else {
-                        self.model.set_reviewer(selection.clone());
-                    }
+                    let chosen = model.to_string();
+                    let outcome = self.model.set_model(role, model, &self.catalog);
+                    let effort_reset = !outcome.invalidated.is_empty();
+                    let _ = self.trace.invalidation(&outcome);
                     let _ = self.trace.mutation(
                         section.as_str(),
                         "model",
-                        serde_json::json!(selection.model.as_str()),
+                        serde_json::json!({
+                            "model": chosen,
+                            "effort_reset_to_model_default": effort_reset,
+                        }),
                         true,
                     );
                 }
             }
             KeyCode::Enter if self.section_index == 2 => {
-                selection.effort = match selection.effort {
-                    spire_domain::Effort::Low => spire_domain::Effort::Medium,
-                    spire_domain::Effort::Medium => spire_domain::Effort::High,
-                    spire_domain::Effort::High => spire_domain::Effort::Low,
-                };
-                if role == OnboardingRole::Maker {
-                    self.model.set_maker(selection.clone());
-                } else {
-                    self.model.set_reviewer(selection.clone());
-                }
+                selection.effort = self.catalog.next_effort(
+                    &selection.provider,
+                    &selection.model,
+                    selection.effort,
+                );
+                self.model.set_effort(role, selection.effort);
                 let _ = self.trace.mutation(
                     section.as_str(),
                     "effort",

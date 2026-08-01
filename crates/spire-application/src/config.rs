@@ -115,11 +115,13 @@ pub struct HarnessRoleConfig {
     pub effort: Effort,
 }
 
+/// Efforts are declared per model because a provider accepts different effort
+/// levels for different models; a flat pair of lists would admit combinations no
+/// provider serves.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdvancedHarnessConfig {
-    pub models: Vec<ModelId>,
-    pub efforts: Vec<Effort>,
+    pub models: BTreeMap<ModelId, BTreeSet<Effort>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -544,25 +546,37 @@ fn compile_harness_configuration(
         return Err(ConfigError::SameMakerReviewerProvider);
     }
 
-    let mut configured = BTreeMap::<HarnessId, (BTreeSet<ModelId>, BTreeSet<Effort>)>::new();
+    let mut configured = BTreeMap::<HarnessId, BTreeMap<ModelId, BTreeSet<Effort>>>::new();
     for role in [&harnesses.maker, &harnesses.reviewer] {
-        let entry = configured.entry(role.provider.clone()).or_default();
-        entry.0.insert(role.model.clone());
-        entry.1.insert(role.effort);
+        configured
+            .entry(role.provider.clone())
+            .or_default()
+            .entry(role.model.clone())
+            .or_default()
+            .insert(role.effort);
     }
     for (provider, advanced) in &harnesses.advanced {
-        if advanced.models.is_empty() || advanced.efforts.is_empty() {
+        if advanced.models.is_empty() {
             return Err(ConfigError::MissingValue {
-                path: format!("harnesses.advanced.{provider}.models/efforts"),
+                path: format!("harnesses.advanced.{provider}.models"),
             });
         }
         let entry = configured.entry(provider.clone()).or_default();
-        entry.0.extend(advanced.models.iter().cloned());
-        entry.1.extend(advanced.efforts.iter().copied());
+        for (model, efforts) in &advanced.models {
+            if efforts.is_empty() {
+                return Err(ConfigError::MissingValue {
+                    path: format!("harnesses.advanced.{provider}.models.{model}"),
+                });
+            }
+            entry
+                .entry(model.clone())
+                .or_default()
+                .extend(efforts.iter().copied());
+        }
     }
     let mut capabilities = HarnessCapabilityRegistry::default();
-    for (provider, (models, efforts)) in configured {
-        capabilities.register(provider, models, efforts);
+    for (provider, models) in configured {
+        capabilities.register(provider, models);
     }
 
     let policy = match dispatch {
@@ -933,10 +947,30 @@ rollout: {linear_writes_enabled: false, allowed_team_ids: [], allowed_repositori
     fn explicit_advanced_policy_is_validated_against_role_capabilities() {
         let advanced = VALID_CONFIG.replace(
             "  reviewer: {provider: claude-code, model: claude-model, effort: medium}",
-            "  reviewer: {provider: claude-code, model: claude-model, effort: medium}\n  advanced:\n    codex: {models: [codex-model, codex-backup], efforts: [medium]}\ndispatch:\n  policy_version: 7\n  rules:\n    - {id: maker-all, when: {role: implementation, complexity: [small, medium, large, xlarge]}, candidates: [{harness: codex, model: codex-model, effort: medium}, {harness: codex, model: codex-backup, effort: medium}]}\n    - {id: review-all, when: {role: review, complexity: [small, medium, large, xlarge]}, candidates: [{harness: claude-code, model: claude-model, effort: medium}]}",
+            "  reviewer: {provider: claude-code, model: claude-model, effort: medium}\n  advanced:\n    codex: {models: {codex-model: [medium], codex-backup: [medium]}}\ndispatch:\n  policy_version: 7\n  rules:\n    - {id: maker-all, when: {role: implementation, complexity: [small, medium, large, xlarge]}, candidates: [{harness: codex, model: codex-model, effort: medium}, {harness: codex, model: codex-backup, effort: medium}]}\n    - {id: review-all, when: {role: review, complexity: [small, medium, large, xlarge]}, candidates: [{harness: claude-code, model: claude-model, effort: medium}]}",
         );
         let config = Config::from_yaml(&advanced).unwrap().validate().unwrap();
         assert_eq!(config.policy.policy_version.value(), 7);
+    }
+
+    #[test]
+    fn advanced_efforts_do_not_leak_between_models_of_the_same_provider() {
+        let advanced = VALID_CONFIG.replace(
+            "  reviewer: {provider: claude-code, model: claude-model, effort: medium}",
+            "  reviewer: {provider: claude-code, model: claude-model, effort: medium}\n  advanced:\n    codex: {models: {codex-model: [medium, ultra], codex-backup: [medium]}}",
+        );
+        let config = Config::from_yaml(&advanced).unwrap().validate().unwrap();
+        let codex = HarnessId::new("codex").unwrap();
+        assert!(config.capabilities.supports(&DispatchCandidate {
+            harness: codex.clone(),
+            model: ModelId::new("codex-model").unwrap(),
+            effort: Effort::Ultra,
+        }));
+        assert!(!config.capabilities.supports(&DispatchCandidate {
+            harness: codex,
+            model: ModelId::new("codex-backup").unwrap(),
+            effort: Effort::Ultra,
+        }));
     }
 
     #[test]

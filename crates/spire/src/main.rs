@@ -60,7 +60,7 @@ use spire_application::{
     WebhookRequest, accept_delivery, dispatch_is_covered, evaluate_eligibility,
 };
 use spire_domain::{
-    ComplexityClass, Effort, HarnessId, LinearIssueId, LinearProjectId, ProjectMappingRevision,
+    ComplexityClass, HarnessId, LinearIssueId, LinearProjectId, ProjectMappingRevision,
     ProjectMappingStatus, ProjectRepositoryMappingId, RepositoryName, RunRole,
 };
 use tokio::{net::TcpListener, sync::oneshot, time::timeout};
@@ -1979,7 +1979,7 @@ async fn doctor(
                     "codex"
                 }),
                 configured_models: vec![role.model.as_str().to_owned()],
-                configured_efforts: vec![effort_name(role.effort).into()],
+                configured_efforts: vec![role.effort.as_str().to_owned()],
             },
         );
         match probe.probe_harness(harness) {
@@ -2229,14 +2229,6 @@ async fn github_service_probe(
     .probe_service("github")
     .await
     .map_err(Into::into)
-}
-
-fn effort_name(effort: Effort) -> &'static str {
-    match effort {
-        Effort::Low => "low",
-        Effort::Medium => "medium",
-        Effort::High => "high",
-    }
 }
 
 fn print_diagnostic_report(report: &DiagnosticReport, format: OutputFormat) -> Result<()> {

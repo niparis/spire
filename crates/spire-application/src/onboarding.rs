@@ -12,7 +12,7 @@ use std::{
     path::Path,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use spire_domain::{ComplexityClass, ComplexityEstimate, Effort, HarnessId, ModelId};
 
 use crate::{
@@ -406,6 +406,55 @@ impl OnboardingModel {
         }
     }
 
+    /// Choosing a model can strand the effort: a model with a lower ceiling does
+    /// not accept the level the previous one did. Rather than let the pair go
+    /// out to a provider that will reject it, the effort falls back to the new
+    /// model's own default and the change is reported as an invalidation.
+    pub fn set_model(
+        &mut self,
+        role: OnboardingRole,
+        model: ModelId,
+        catalog: &ModelCatalog,
+    ) -> MutationOutcome {
+        let section = match role {
+            OnboardingRole::Maker => OnboardingSection::Maker,
+            OnboardingRole::Reviewer => OnboardingSection::Reviewer,
+        };
+        let editable = match role {
+            OnboardingRole::Maker => &mut self.maker,
+            OnboardingRole::Reviewer => &mut self.reviewer,
+        };
+        let Some(selection) = editable.value.as_mut() else {
+            return MutationOutcome::default();
+        };
+        selection.model = model;
+        let mut outcome = MutationOutcome {
+            mutation: format!("{}.model", section.as_str()),
+            ..MutationOutcome::default()
+        };
+        if !catalog.accepts_effort(&selection.provider, &selection.model, selection.effort) {
+            selection.effort = catalog.default_effort_for(&selection.provider, &selection.model);
+            outcome.invalidated.push(section);
+        }
+        let selection = selection.clone();
+        *editable = Editable::complete(selection);
+        match role {
+            OnboardingRole::Maker => self.maker_model_confirmed = true,
+            OnboardingRole::Reviewer => self.reviewer_model_confirmed = true,
+        }
+        outcome
+    }
+
+    pub fn set_effort(&mut self, role: OnboardingRole, effort: Effort) {
+        let editable = match role {
+            OnboardingRole::Maker => &mut self.maker,
+            OnboardingRole::Reviewer => &mut self.reviewer,
+        };
+        if let Some(selection) = editable.value.as_mut() {
+            selection.effort = effort;
+        }
+    }
+
     pub fn set_model_catalog_state(&mut self, role: OnboardingRole, off_catalog: bool) {
         if off_catalog {
             self.off_catalog_roles.insert(role);
@@ -788,6 +837,84 @@ pub struct HarnessSelection {
     pub effort: Effort,
 }
 
+/// The list of models an operator may pick from without typing one in. Loading
+/// it is the CLI's job; every derivation over it is pure and lives here so the
+/// editor never decides which effort a model accepts.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelCatalog {
+    pub version: String,
+    pub providers: BTreeMap<String, Vec<CatalogModel>>,
+}
+
+/// Effort belongs to the model rather than the provider: one provider serves
+/// models with different reasoning ceilings.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogModel {
+    pub id: String,
+    pub default_effort: Effort,
+    pub efforts: Vec<Effort>,
+}
+
+impl ModelCatalog {
+    pub fn models_for(&self, provider: &HarnessId) -> Vec<ModelId> {
+        self.entries_for(provider)
+            .iter()
+            .filter_map(|entry| ModelId::new(entry.id.clone()).ok())
+            .collect()
+    }
+
+    pub fn entries_for(&self, provider: &HarnessId) -> &[CatalogModel] {
+        self.providers
+            .get(provider.as_str())
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub fn entry(&self, provider: &HarnessId, model: &ModelId) -> Option<&CatalogModel> {
+        self.entries_for(provider)
+            .iter()
+            .find(|entry| entry.id == model.as_str())
+    }
+
+    /// An off-catalog model declares no ceiling, so every level stays offered
+    /// and the operator owns the choice.
+    pub fn efforts_for(&self, provider: &HarnessId, model: &ModelId) -> Vec<Effort> {
+        self.entry(provider, model)
+            .map_or_else(|| Effort::ALL.to_vec(), |entry| entry.efforts.clone())
+    }
+
+    pub fn default_effort_for(&self, provider: &HarnessId, model: &ModelId) -> Effort {
+        self.entry(provider, model)
+            .map_or(Effort::Medium, |entry| entry.default_effort)
+    }
+
+    pub fn accepts_effort(&self, provider: &HarnessId, model: &ModelId, effort: Effort) -> bool {
+        self.efforts_for(provider, model).contains(&effort)
+    }
+
+    /// Advances to the next effort this model accepts, wrapping at the ceiling.
+    pub fn next_effort(&self, provider: &HarnessId, model: &ModelId, current: Effort) -> Effort {
+        let efforts = self.efforts_for(provider, model);
+        let Some(index) = efforts.iter().position(|effort| *effort == current) else {
+            return self.default_effort_for(provider, model);
+        };
+        efforts[(index + 1) % efforts.len()]
+    }
+
+    /// Advances to the next model this provider lists, wrapping at the end.
+    pub fn next_model(&self, provider: &HarnessId, current: &ModelId) -> Option<ModelId> {
+        let models = self.models_for(provider);
+        if models.is_empty() {
+            return None;
+        }
+        let next = models
+            .iter()
+            .position(|model| model == current)
+            .map_or(0, |index| (index + 1) % models.len());
+        models.get(next).cloned()
+    }
+}
+
 /// Everything an operator confirmed during `spire init`. Secrets never appear
 /// here: the API key lives in the secret store and is referenced by neither this
 /// value nor the rendered configuration.
@@ -1072,10 +1199,10 @@ rollout:
 ",
         maker_provider = scalar(answers.maker.provider.as_str()),
         maker_model = scalar(answers.maker.model.as_str()),
-        maker_effort = effort_name(answers.maker.effort),
+        maker_effort = answers.maker.effort.as_str(),
         reviewer_provider = scalar(answers.reviewer.provider.as_str()),
         reviewer_model = scalar(answers.reviewer.model.as_str()),
-        reviewer_effort = effort_name(answers.reviewer.effort),
+        reviewer_effort = answers.reviewer.effort.as_str(),
         database = scalar_path(&data_root.join("spire.db")),
         data = scalar_path(data_root),
         backups = scalar_path(&data_root.join("backups")),
@@ -1221,14 +1348,6 @@ fn complexity_class_name(class: ComplexityClass) -> &'static str {
         ComplexityClass::Medium => "medium",
         ComplexityClass::Large => "large",
         ComplexityClass::Xlarge => "xlarge",
-    }
-}
-
-fn effort_name(effort: Effort) -> &'static str {
-    match effort {
-        Effort::Low => "low",
-        Effort::Medium => "medium",
-        Effort::High => "high",
     }
 }
 
@@ -1413,6 +1532,80 @@ mod tests {
             config.harnesses.catalog_version.as_deref(),
             Some("catalog-test")
         );
+    }
+
+    fn catalog() -> ModelCatalog {
+        ModelCatalog {
+            version: "test".to_owned(),
+            providers: BTreeMap::from([(
+                "codex".to_owned(),
+                vec![
+                    CatalogModel {
+                        id: "wide".to_owned(),
+                        default_effort: Effort::Low,
+                        efforts: vec![Effort::Low, Effort::Medium, Effort::High, Effort::Ultra],
+                    },
+                    CatalogModel {
+                        id: "narrow".to_owned(),
+                        default_effort: Effort::Medium,
+                        efforts: vec![Effort::Low, Effort::Medium],
+                    },
+                ],
+            )]),
+        }
+    }
+
+    #[test]
+    fn effort_cycles_only_through_the_levels_the_model_accepts() {
+        let catalog = catalog();
+        let codex = HarnessId::new("codex").unwrap();
+        let narrow = ModelId::new("narrow").unwrap();
+        assert_eq!(
+            catalog.next_effort(&codex, &narrow, Effort::Medium),
+            Effort::Low
+        );
+        // An effort the model does not accept falls back to its default rather
+        // than advancing from a level that was never legal.
+        assert_eq!(
+            catalog.next_effort(&codex, &narrow, Effort::Ultra),
+            Effort::Medium
+        );
+        // Off-catalog models declare no ceiling, so nothing is withheld.
+        let unknown = ModelId::new("unknown").unwrap();
+        assert_eq!(catalog.efforts_for(&codex, &unknown), Effort::ALL.to_vec());
+    }
+
+    #[test]
+    fn choosing_a_narrower_model_resets_a_now_illegal_effort() {
+        let catalog = catalog();
+        let codex = HarnessId::new("codex").unwrap();
+        let mut model = OnboardingModel::empty();
+        model.maker.value = Some(HarnessSelection {
+            provider: codex.clone(),
+            model: ModelId::new("wide").unwrap(),
+            effort: Effort::Ultra,
+        });
+
+        let outcome = model.set_model(
+            OnboardingRole::Maker,
+            ModelId::new("narrow").unwrap(),
+            &catalog,
+        );
+        assert_eq!(outcome.invalidated, vec![OnboardingSection::Maker]);
+        assert_eq!(
+            model.maker.value.as_ref().unwrap().effort,
+            Effort::Medium,
+            "the effort falls back to the new model's own default"
+        );
+
+        // A model that still accepts the current effort leaves it alone.
+        let outcome = model.set_model(
+            OnboardingRole::Maker,
+            ModelId::new("wide").unwrap(),
+            &catalog,
+        );
+        assert!(outcome.invalidated.is_empty());
+        assert_eq!(model.maker.value.as_ref().unwrap().effort, Effort::Medium);
     }
 
     #[test]
