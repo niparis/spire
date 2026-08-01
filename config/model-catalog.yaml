@@ -1,9 +1,28 @@
 # Editable without rebuilding Spire. The catalog is a convenience list, not a
 # provider authority; an explicit off-catalog model is recorded as unverified.
-version: "2026-07-31"
+#
+# Provenance, 2026-08-01:
+#   codex       ~/.codex/models_cache.json, the list Codex CLI 0.146.0 itself
+#               fetched. Ordered by that file's own priority field.
+#   claude-code models observed in use by Claude Code 2.1.148, cross-checked
+#               against the published lineup.
+# Both providers ship models faster than Spire releases, which is why this file
+# is read at runtime and an off-catalog entry stays permitted.
+version: "2026-08-01"
 providers:
   codex:
+    - gpt-5.6-sol
+    - gpt-5.6-terra
     - gpt-5.6-luna
+    - codex-auto-review
+    - gpt-5.5
+    - gpt-5.4
+    - gpt-5.4-mini
   claude-code:
+    - claude-opus-5
+    - claude-sonnet-5
+    - claude-fable-5
+    - claude-opus-4-8
     - claude-opus-4-7
-    - claude-sonnet-4-5
+    - claude-sonnet-4-6
+    - claude-haiku-4-5-20251001
