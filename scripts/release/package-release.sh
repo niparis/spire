@@ -57,6 +57,7 @@ readonly staging_directory="$(mktemp -d)"
 trap 'rm -rf "${staging_directory}"' EXIT
 
 install -m 0755 "${binary_path}" "${staging_directory}/spire"
+install -m 0644 "${repository_root}/config/model-catalog.yaml" "${staging_directory}/model-catalog.yaml"
 install -m 0644 "${repository_root}/LICENSE" "${staging_directory}/LICENSE"
 printf '%s\n' "${release_tag#v}" >"${staging_directory}/VERSION"
 
@@ -70,9 +71,9 @@ if tar --version 2>/dev/null | grep -q 'GNU tar'; then
     --numeric-owner \
     -C "${staging_directory}" \
     -czf "${archive_path}" \
-    LICENSE VERSION spire
+    LICENSE VERSION model-catalog.yaml spire
 else
-  tar -C "${staging_directory}" -czf "${archive_path}" LICENSE VERSION spire
+  tar -C "${staging_directory}" -czf "${archive_path}" LICENSE VERSION model-catalog.yaml spire
 fi
 
 (

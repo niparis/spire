@@ -34,11 +34,12 @@ make_archive() {
   printf '#!/usr/bin/env sh\nprintf "spire %s\\n" "%s"\n' "${version}" "${version}" >"${stage}/spire"
   chmod +x "${stage}/spire"
   printf '%s\n' "${version}" >"${stage}/VERSION"
+  printf 'version: test\nproviders: {}\n' >"${stage}/model-catalog.yaml"
   if [[ "${include_license}" == true ]]; then
     printf 'license fixture\n' >"${stage}/LICENSE"
-    tar -C "${stage}" -czf "${scratch}/${name}" LICENSE VERSION spire
+    tar -C "${stage}" -czf "${scratch}/${name}" LICENSE VERSION model-catalog.yaml spire
   else
-    tar -C "${stage}" -czf "${scratch}/${name}" VERSION spire
+    tar -C "${stage}" -czf "${scratch}/${name}" VERSION model-catalog.yaml spire
   fi
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "${scratch}/${name}" | sed "s#${scratch}/##" >"${scratch}/SHA256SUMS"

@@ -27,8 +27,9 @@ make_archive() {
   printf '#!/bin/sh\nprintf "spire %s\\n"\n' "${version}" >"${stage}/spire"
   chmod +x "${stage}/spire"
   printf '%s\n' "${version}" >"${stage}/VERSION"
+  printf 'version: test\nproviders: {}\n' >"${stage}/model-catalog.yaml"
   printf 'license fixture\n' >"${stage}/LICENSE"
-  tar -C "${stage}" -czf "${scratch}/input/${target}/${archive}" LICENSE VERSION spire
+  tar -C "${stage}" -czf "${scratch}/input/${target}/${archive}" LICENSE VERSION model-catalog.yaml spire
 }
 
 mkdir -p "${scratch}/input"

@@ -43,35 +43,36 @@ pub struct HarnessCapabilityRegistry {
     harnesses: BTreeMap<HarnessId, HarnessCapability>,
 }
 
+/// Effort is a property of the model, not of the harness: two models behind the
+/// same harness accept different effort levels, so the sets cannot be crossed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HarnessCapability {
-    models: BTreeSet<ModelId>,
-    efforts: BTreeSet<Effort>,
+    models: BTreeMap<ModelId, BTreeSet<Effort>>,
 }
 
 impl HarnessCapabilityRegistry {
     pub fn register(
         &mut self,
         harness: HarnessId,
-        models: impl IntoIterator<Item = ModelId>,
-        efforts: impl IntoIterator<Item = Effort>,
+        models: impl IntoIterator<Item = (ModelId, BTreeSet<Effort>)>,
     ) {
         self.harnesses.insert(
             harness,
             HarnessCapability {
                 models: models.into_iter().collect(),
-                efforts: efforts.into_iter().collect(),
             },
         );
     }
 
     pub fn supports(&self, candidate: &DispatchCandidate) -> bool {
+        self.efforts_for(&candidate.harness, &candidate.model)
+            .is_some_and(|efforts| efforts.contains(&candidate.effort))
+    }
+
+    pub fn efforts_for(&self, harness: &HarnessId, model: &ModelId) -> Option<&BTreeSet<Effort>> {
         self.harnesses
-            .get(&candidate.harness)
-            .is_some_and(|capability| {
-                capability.models.contains(&candidate.model)
-                    && capability.efforts.contains(&candidate.effort)
-            })
+            .get(harness)
+            .and_then(|capability| capability.models.get(model))
     }
 }
 
@@ -299,8 +300,10 @@ mod tests {
         for harness in ["codex", "claude-code"] {
             registry.register(
                 id(harness),
-                [model(&format!("{harness}-model"))],
-                [Effort::Medium],
+                [(
+                    model(&format!("{harness}-model")),
+                    BTreeSet::from([Effort::Medium]),
+                )],
             );
         }
         registry
@@ -333,6 +336,32 @@ mod tests {
     #[test]
     fn policy_has_exact_coverage_and_different_harness_reviewers() {
         assert!(policy().validate(&registry()).is_ok());
+    }
+
+    #[test]
+    fn effort_is_scoped_to_the_model_not_crossed_across_the_harness() {
+        let mut registry = HarnessCapabilityRegistry::default();
+        registry.register(
+            id("codex"),
+            [
+                (
+                    model("gpt-5.6-sol"),
+                    BTreeSet::from([Effort::High, Effort::Ultra]),
+                ),
+                (model("gpt-5.5"), BTreeSet::from([Effort::High])),
+            ],
+        );
+
+        assert!(registry.supports(&DispatchCandidate {
+            harness: id("codex"),
+            model: model("gpt-5.6-sol"),
+            effort: Effort::Ultra,
+        }));
+        assert!(!registry.supports(&DispatchCandidate {
+            harness: id("codex"),
+            model: model("gpt-5.5"),
+            effort: Effort::Ultra,
+        }));
     }
 
     #[test]

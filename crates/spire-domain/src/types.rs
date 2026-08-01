@@ -173,12 +173,56 @@ impl ComplexityClass {
     pub const ALL: [Self; 4] = [Self::Small, Self::Medium, Self::Large, Self::Xlarge];
 }
 
+/// Ordered from least to most reasoning budget; `Ord` is relied upon to compare
+/// an effort against a model's ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Effort {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
+    Ultra,
+}
+
+impl Effort {
+    pub const ALL: [Self; 6] = [
+        Self::Low,
+        Self::Medium,
+        Self::High,
+        Self::XHigh,
+        Self::Max,
+        Self::Ultra,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    pub fn parse(value: &str) -> Result<Self, ValueError> {
+        Self::ALL
+            .into_iter()
+            .find(|effort| effort.as_str() == value)
+            .ok_or_else(|| ValueError::Invalid {
+                kind: "effort",
+                value: value.to_string(),
+            })
+    }
+}
+
+impl fmt::Display for Effort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]

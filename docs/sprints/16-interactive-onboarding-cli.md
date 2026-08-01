@@ -169,6 +169,13 @@ an average of one answer.
 | Maker provider | Maker model | The catalog is per-provider. |
 | Maker provider | Reviewer | The reviewer's options exclude the maker's provider, so a confirmed reviewer may no longer be legal. |
 | Reviewer provider | Reviewer model | Same catalog scoping. |
+| Model | Effort of the same role | Effort is a property of the model, not the provider: two models behind one provider accept different levels, so a model with a lower ceiling strands the confirmed effort. |
+
+The model-to-effort edge differs from the others in its recovery. A stranded
+effort has a single unambiguous replacement — the new model's own default — so
+the editor substitutes it and reports the substitution, rather than marking the
+section stale and demanding a re-confirmation that could only produce the same
+answer. Retaining the illegal level would send the provider a pair it rejects.
 
 13. Retain the stale value and offer it as the default when the section is
     reopened, unless it is no longer among the legal options. Discarding a value
@@ -280,17 +287,34 @@ Implementation:
 
 1. Add a catalog data file listing known model identifiers per provider, loadable
    without rebuilding the binary.
-2. Offer the catalog entries for the selected provider as the section's list.
-3. Accept a model outside the catalog through an explicit escape, record it, and
-   mark it unverified in the section and the review.
-4. Reject an empty model. Do not attempt to infer intent from the shape of the
+2. Give each catalog entry the effort levels it accepts and the provider's own
+   default, rather than one effort list per provider. A provider serves models
+   with different reasoning ceilings, so a provider-wide list offers pairs the
+   provider rejects at dispatch. Carry the same shape through to
+   `HarnessCapabilityRegistry` and to `harnesses.advanced` in the configuration.
+3. Offer the catalog entries for the selected provider as the section's list, and
+   offer only the selected model's efforts as the effort list.
+4. Accept a model outside the catalog through an explicit escape, record it, and
+   mark it unverified in the section and the review. An off-catalog model
+   declares no ceiling, so every effort stays offered and the operator owns the
+   choice.
+5. Reject an empty model. Do not attempt to infer intent from the shape of the
    input; a syntactic guard cannot distinguish a retired model from a current
    one.
-5. Record the catalog version used, so a configuration can be explained later.
+6. Reject a catalog entry whose default effort is absent from its own effort
+   list, at load time, with the model named.
+7. Record the catalog version used, so a configuration can be explained later.
 
 Verification:
 
-- The model section offers only the selected provider's entries.
+- The model section offers only the selected provider's entries, and cycling
+  reaches every one of them rather than repeatedly selecting the first.
+- The effort section offers only the levels the selected model accepts.
+- Selecting a model with a lower ceiling substitutes that model's default effort
+  and reports the substitution.
+- The capability registry refuses a model/effort pair that neither the catalog
+  nor the configuration declared together, even when both appear separately
+  under the same provider.
 - An off-catalog model is accepted and marked unverified in both the section and
   the trace.
 - A missing or malformed catalog file fails at startup with the path named,
@@ -408,9 +432,13 @@ provisioning operation, with rollout still disabled and no ticket admitted.
 - The editor is a full-screen `ratatui` application on the alternate screen. The
   rendering dependency belongs to the CLI crate only and must not reach the
   application layer.
-- Codex exposes no model alias system and no model listing. Claude Code accepts
-  stable aliases. The catalog's shape must accommodate both without implying the
-  two providers offer equivalent guarantees.
+- Codex CLI does fetch a model list and caches it at `~/.codex/models_cache.json`
+  with a per-model effort set and default; the catalog's codex rows are copied
+  from an observed cache. Claude Code publishes one `--effort` list on its CLI
+  without per-model qualification, so its rows repeat that list and are the
+  weaker claim. The catalog must accommodate both without implying the two
+  providers offer equivalent guarantees. Reading either provider's cache at
+  runtime is out of scope; the file stays operator-editable instead.
 - Model probing is out of scope here. It depends on a harness execution path that
   can spawn a provider process, which `crates/spire-adapters/src/harness.rs` does
   not yet do.

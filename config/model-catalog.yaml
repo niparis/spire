@@ -1,0 +1,62 @@
+# Editable without rebuilding Spire. The catalog is a convenience list, not a
+# provider authority; an explicit off-catalog model is recorded as unverified.
+#
+# Effort is declared per model, not per provider: one provider serves models
+# with different reasoning ceilings, so a provider-wide effort list would offer
+# combinations the provider rejects at dispatch.
+#
+# Provenance, 2026-08-01:
+#   codex       ~/.codex/models_cache.json, the list Codex CLI 0.146.0 itself
+#               fetched. Model order, effort sets, and defaults are that file's.
+#   claude-code models observed in use by Claude Code 2.1.148, cross-checked
+#               against the published lineup. Claude Code documents one effort
+#               list on `--effort` without per-model qualification, so every
+#               entry repeats it; narrow a row here if a model proves stricter.
+# Both providers ship models faster than Spire releases, which is why this file
+# is read at runtime and an off-catalog entry stays permitted.
+version: "2026-08-01"
+providers:
+  codex:
+    - id: gpt-5.6-sol
+      default_effort: low
+      efforts: [low, medium, high, xhigh, max, ultra]
+    - id: gpt-5.6-terra
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max, ultra]
+    - id: gpt-5.6-luna
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max]
+    - id: codex-auto-review
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max, ultra]
+    - id: gpt-5.5
+      default_effort: medium
+      efforts: [low, medium, high, xhigh]
+    - id: gpt-5.4
+      default_effort: medium
+      efforts: [low, medium, high, xhigh]
+    - id: gpt-5.4-mini
+      default_effort: medium
+      efforts: [low, medium, high, xhigh]
+  claude-code:
+    - id: claude-opus-5
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max]
+    - id: claude-sonnet-5
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max]
+    - id: claude-fable-5
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max]
+    - id: claude-opus-4-8
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max]
+    - id: claude-opus-4-7
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max]
+    - id: claude-sonnet-4-6
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max]
+    - id: claude-haiku-4-5-20251001
+      default_effort: medium
+      efforts: [low, medium, high, xhigh, max]

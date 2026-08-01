@@ -106,14 +106,6 @@ fn initiator_name(initiator: SchedulerInitiator) -> &'static str {
     }
 }
 
-fn effort_name(effort: spire_domain::Effort) -> &'static str {
-    match effort {
-        spire_domain::Effort::Low => "low",
-        spire_domain::Effort::Medium => "medium",
-        spire_domain::Effort::High => "high",
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum SqliteAdapterError {
     #[error("database path must be absolute: {0}")]
@@ -1153,7 +1145,7 @@ impl SqliteDatabase {
             }
             let candidates_json = item.get::<String, _>("review_candidates_json");
             let candidates = serde_json::from_str::<Vec<spire_domain::DispatchCandidate>>(&candidates_json).unwrap_or_default();
-            if !candidates.iter().any(|candidate| candidate.harness.as_str() == dispatch.harness && candidate.model.as_str() == dispatch.model && effort_name(candidate.effort) == dispatch.effort) {
+            if !candidates.iter().any(|candidate| candidate.harness.as_str() == dispatch.harness && candidate.model.as_str() == dispatch.model && candidate.effort.as_str() == dispatch.effort) {
                 return Ok(ReviewDispatchPersistence::CandidateNotSnapshotted);
             }
             let round = item.get::<i64, _>("review_correction_cycles") as u8 + 1;
