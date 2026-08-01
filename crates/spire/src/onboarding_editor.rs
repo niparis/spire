@@ -36,7 +36,7 @@ use spire_application::{
     OnboardingEditorPort, OnboardingEditorResult, OnboardingModel, OnboardingRole,
     OnboardingSection, SectionStatus, rank_states, suggest_complexity_mapping,
 };
-use spire_domain::{HarnessId, ModelId};
+use spire_domain::{ComplexityClass, HarnessId, ModelId};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 #[cfg(test)]
@@ -385,7 +385,10 @@ struct EditorSession {
     screen: Screen,
     home_index: usize,
     section_index: usize,
-    multi_selected: BTreeSet<String>,
+    // One set per multi-select section: a shared set would let confirmed type
+    // labels be written out as allowed rollout team IDs.
+    selected_type_labels: BTreeSet<String>,
+    selected_rollout_teams: BTreeSet<String>,
     error: Option<String>,
     trace: TraceWriter,
 }
@@ -397,8 +400,15 @@ impl EditorSession {
         catalog: ModelCatalog,
         trace_path: PathBuf,
     ) -> Result<Self> {
-        let multi_selected = model
+        let selected_type_labels = model
             .type_labels
+            .value
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let selected_rollout_teams = model
+            .rollout_allowed_team_ids
             .value
             .clone()
             .unwrap_or_default()
@@ -424,7 +434,8 @@ impl EditorSession {
             screen: Screen::Home,
             home_index: 0,
             section_index: 0,
-            multi_selected,
+            selected_type_labels,
+            selected_rollout_teams,
             error: None,
             trace,
         })
@@ -591,10 +602,41 @@ impl EditorSession {
                 .discovery
                 .teams
                 .iter()
-                .map(|team| format!("{} ({})", team.name, team.id))
+                .map(|team| format!("{} ({})", team.name, team.key))
                 .collect(),
             _ => Vec::new(),
         }
+    }
+
+    fn team_configuration(&self) -> Option<&LinearTeamConfiguration> {
+        self.model
+            .team_id
+            .value
+            .as_deref()
+            .and_then(|team_id| self.discovery.team_configurations.get(team_id))
+    }
+
+    fn team_label(&self, team_id: &str) -> String {
+        self.discovery
+            .teams
+            .iter()
+            .find(|team| team.id == team_id)
+            .map(|team| format!("{} ({})", team.name, team.key))
+            .unwrap_or_else(|| team_id.to_owned())
+    }
+
+    /// Linear identifies a state by an opaque UUID, but an operator recognises it
+    /// by name; the ID is only useful when the name cannot be resolved.
+    fn state_label(&self, state_id: &str) -> String {
+        self.team_configuration()
+            .and_then(|configuration| {
+                configuration
+                    .states
+                    .iter()
+                    .find(|state| state.id == state_id)
+            })
+            .map(|state| format!("{} [{:?}]", state.name, state.category))
+            .unwrap_or_else(|| format!("{state_id} (unknown to this team)"))
     }
 
     fn handle_key(
@@ -635,7 +677,11 @@ impl EditorSession {
             }
             KeyCode::Enter => {
                 self.section_index = 0;
-                self.screen = Screen::Section(OnboardingSection::ALL[self.home_index]);
+                let section = OnboardingSection::ALL[self.home_index];
+                if section == OnboardingSection::Complexity {
+                    self.seed_complexity_suggestion();
+                }
+                self.screen = Screen::Section(section);
             }
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 self.home_index = OnboardingSection::ReviewAndWrite as usize;
@@ -674,6 +720,16 @@ impl EditorSession {
             self.screen = Screen::Section(OnboardingSection::ReviewAndWrite);
             return false;
         }
+        // A section marked stale by an upstream change may already hold the right
+        // answer. Without this the only way to clear the mark is to alter a value
+        // and alter it back.
+        if key.code == KeyCode::Char('a') || key.code == KeyCode::Char('A') {
+            self.model.confirm_section(section);
+            let _ =
+                self.trace
+                    .mutation(section.as_str(), "accepted", serde_json::json!(true), true);
+            return false;
+        }
         match section {
             OnboardingSection::Linear => {
                 let items = self.section_items(section);
@@ -700,41 +756,7 @@ impl EditorSession {
                 }
             }
             OnboardingSection::WorkflowStates => self.handle_workflow_key(key),
-            OnboardingSection::Complexity => {
-                if key.code == KeyCode::Enter {
-                    if let Some(configuration) = self
-                        .model
-                        .team_id
-                        .value
-                        .as_deref()
-                        .and_then(|team_id| self.discovery.team_configurations.get(team_id))
-                        && let Ok(mapping) = suggest_complexity_mapping(&configuration.estimates)
-                    {
-                        self.model.complexity =
-                            Editable::complete(spire_application::ComplexitySelection {
-                                scale: configuration.estimates.clone(),
-                                mapping,
-                            });
-                    }
-                    self.model.confirm_section(section);
-                    let _ = self.trace.mutation(
-                        section.as_str(),
-                        "mapping",
-                        self.model
-                            .complexity
-                            .value
-                            .as_ref()
-                            .map(|complexity| {
-                                serde_json::json!({
-                                    "estimate_scale": complexity.scale,
-                                    "mapping": complexity.mapping,
-                                })
-                            })
-                            .unwrap_or(serde_json::Value::Null),
-                        true,
-                    );
-                }
-            }
+            OnboardingSection::Complexity => self.handle_complexity_key(key),
             OnboardingSection::Maker | OnboardingSection::Reviewer => {
                 self.handle_harness_key(section, key)
             }
@@ -754,6 +776,61 @@ impl EditorSession {
         false
     }
 
+    /// The mapping is derived from the team's estimate scale so the operator has
+    /// something to adjust rather than something to author.
+    fn seed_complexity_suggestion(&mut self) {
+        if self.model.complexity.value.is_some() {
+            return;
+        }
+        if let Some(configuration) = self.team_configuration()
+            && let Ok(mapping) = suggest_complexity_mapping(&configuration.estimates)
+        {
+            self.model.complexity = Editable::complete(spire_application::ComplexitySelection {
+                scale: configuration.estimates.clone(),
+                mapping,
+            });
+        }
+    }
+
+    fn handle_complexity_key(&mut self, key: KeyEvent) {
+        self.seed_complexity_suggestion();
+        let Some(complexity) = self.model.complexity.value.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Up => self.section_index = self.section_index.saturating_sub(1),
+            KeyCode::Down => {
+                self.section_index =
+                    (self.section_index + 1).min(complexity.mapping.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                let Some((estimate, class)) = complexity
+                    .mapping
+                    .iter()
+                    .nth(self.section_index)
+                    .map(|(estimate, class)| (*estimate, *class))
+                else {
+                    return;
+                };
+                let next = ComplexityClass::ALL[(ComplexityClass::ALL
+                    .iter()
+                    .position(|candidate| *candidate == class)
+                    .unwrap_or(0)
+                    + 1)
+                    % ComplexityClass::ALL.len()];
+                complexity.mapping.insert(estimate, next);
+                self.model.confirm_section(OnboardingSection::Complexity);
+                let _ = self.trace.mutation(
+                    OnboardingSection::Complexity.as_str(),
+                    "mapping",
+                    serde_json::json!({ "estimate": estimate.value(), "class": format!("{next:?}") }),
+                    false,
+                );
+            }
+            _ => {}
+        }
+    }
+
     fn handle_workflow_key(&mut self, key: KeyEvent) {
         let Some(configuration) = self
             .model
@@ -771,7 +848,14 @@ impl EditorSession {
             }
             KeyCode::Enter => {
                 let kind = LinearStateKind::ALL[self.section_index];
-                let candidates = rank_states(kind, &configuration.states);
+                // Suggestions lead, but every state stays reachable: a workspace
+                // whose names Spire does not recognise would otherwise offer the
+                // operator nothing to cycle through.
+                let mut candidates = rank_states(kind, &configuration.states);
+                let unranked = (0..configuration.states.len())
+                    .filter(|index| !candidates.contains(index))
+                    .collect::<Vec<_>>();
+                candidates.extend(unranked);
                 let current = self
                     .model
                     .workflow_states
@@ -921,19 +1005,25 @@ impl EditorSession {
                 self.section_index = (self.section_index + 1).min(items.len().saturating_sub(1))
             }
             KeyCode::Char(' ') if !items.is_empty() => {
-                let item = if section == OnboardingSection::TypeLabels {
-                    items[self.section_index].clone()
+                let (item, chosen) = if section == OnboardingSection::TypeLabels {
+                    (
+                        items[self.section_index].clone(),
+                        &mut self.selected_type_labels,
+                    )
                 } else {
-                    self.discovery.teams[self.section_index].id.clone()
+                    (
+                        self.discovery.teams[self.section_index].id.clone(),
+                        &mut self.selected_rollout_teams,
+                    )
                 };
-                if !self.multi_selected.insert(item.clone()) {
-                    self.multi_selected.remove(&item);
+                if !chosen.insert(item.clone()) {
+                    chosen.remove(&item);
                 }
             }
             KeyCode::Enter => {
-                let selected = self.multi_selected.iter().cloned().collect::<Vec<_>>();
                 if section == OnboardingSection::TypeLabels {
-                    self.model.type_labels = Editable::complete(selected);
+                    self.model.type_labels =
+                        Editable::complete(self.selected_type_labels.iter().cloned().collect());
                     self.model.confirm_section(section);
                     let _ = self.trace.mutation(
                         section.as_str(),
@@ -942,7 +1032,8 @@ impl EditorSession {
                         false,
                     );
                 } else {
-                    self.model.rollout_allowed_team_ids = Editable::complete(selected);
+                    self.model.rollout_allowed_team_ids =
+                        Editable::complete(self.selected_rollout_teams.iter().cloned().collect());
                     let _ = self.trace.mutation(
                         section.as_str(),
                         "allowed_team_ids",
@@ -1066,15 +1157,53 @@ fn home_widget<'a>(session: &'a EditorSession, _area: Rect) -> impl Widget + 'a 
     )
 }
 
+/// What the section decides and how it is driven. Shown in the section itself
+/// because a section name alone does not say what the value is used for.
+fn section_help(section: OnboardingSection) -> &'static str {
+    match section {
+        OnboardingSection::Linear => {
+            "The Linear team Spire watches for tickets. Enter selects; r refetches."
+        }
+        OnboardingSection::WorkflowStates => {
+            "Which of this team's states Spire reads and writes as it moves a ticket. Enter cycles the highlighted role through every state."
+        }
+        OnboardingSection::Complexity => {
+            "Maps each Linear estimate point to the complexity class that picks a harness. Enter cycles the highlighted point; a accepts the suggestion."
+        }
+        OnboardingSection::Maker => {
+            "The harness that writes the implementation. Its provider must differ from the reviewer's."
+        }
+        OnboardingSection::Reviewer => {
+            "The harness that reviews the implementation, on a different provider than the maker."
+        }
+        OnboardingSection::TypeLabels => {
+            "Ticket labels Spire treats as work types. Space toggles; Enter stores the selection."
+        }
+        OnboardingSection::Rollout => {
+            "Teams allowed to trigger automation. Everything stays inert until a team is listed here. Space toggles; Enter stores the selection."
+        }
+        OnboardingSection::Paths => "Where the configuration file will be written.",
+        OnboardingSection::ReviewAndWrite => {
+            "Every section's state. Enter writes the configuration; a refusal names the section."
+        }
+    }
+}
+
 fn section_widget<'a>(
     session: &'a EditorSession,
     section: OnboardingSection,
     _area: Rect,
 ) -> impl Widget + 'a {
-    let mut lines = vec![Line::from(Span::styled(
-        section.as_str().to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
+    let mut lines = vec![
+        Line::from(Span::styled(
+            section.as_str().to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            section_help(section),
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
     match section {
         OnboardingSection::Linear => {
             lines.push(Line::from(format!(
@@ -1105,15 +1234,16 @@ fn section_widget<'a>(
                     .workflow_states
                     .get(&kind)
                     .and_then(|state| state.value.as_deref())
-                    .unwrap_or("unbound");
+                    .map(|state_id| session.state_label(state_id))
+                    .unwrap_or_else(|| "unbound".to_owned());
                 lines.push(Line::from(format!(
-                    "{} {}: {}",
+                    "{} {:<14} {}",
                     if kind as usize == session.section_index {
                         ">"
                     } else {
                         " "
                     },
-                    kind.as_str(),
+                    format!("{}:", kind.as_str()),
                     value
                 )));
             }
@@ -1121,11 +1251,19 @@ fn section_widget<'a>(
         OnboardingSection::Complexity => {
             if let Some(complexity) = session.model.complexity.value.as_ref() {
                 lines.push(Line::from(format!(
-                    "scale: {} ({:?})",
+                    "estimate scale: {} ({:?})",
                     complexity.scale.kind, complexity.scale.points
                 )));
-                for (estimate, class) in &complexity.mapping {
-                    lines.push(Line::from(format!("  {} -> {class:?}", estimate.value())));
+                for (index, (estimate, class)) in complexity.mapping.iter().enumerate() {
+                    lines.push(Line::from(format!(
+                        "{} {} -> {class:?}",
+                        if index == session.section_index {
+                            ">"
+                        } else {
+                            " "
+                        },
+                        estimate.value()
+                    )));
                 }
             } else {
                 lines.push(Line::from("waiting for a usable estimate scale"));
@@ -1195,16 +1333,18 @@ fn section_widget<'a>(
             }
         }
         OnboardingSection::TypeLabels | OnboardingSection::Rollout => {
-            lines.push(Line::from("Space toggles membership; Enter confirms."));
+            let type_labels = section == OnboardingSection::TypeLabels;
+            let chosen = if type_labels {
+                &session.selected_type_labels
+            } else {
+                &session.selected_rollout_teams
+            };
             for (index, item) in session.section_items(section).iter().enumerate() {
-                let selected =
-                    session
-                        .multi_selected
-                        .contains(if section == OnboardingSection::TypeLabels {
-                            item
-                        } else {
-                            &session.discovery.teams[index].id
-                        });
+                let selected = chosen.contains(if type_labels {
+                    item
+                } else {
+                    &session.discovery.teams[index].id
+                });
                 lines.push(Line::from(format!(
                     "{} [{}] {}",
                     if index == session.section_index {
@@ -1216,6 +1356,23 @@ fn section_widget<'a>(
                     item
                 )));
             }
+            // Toggling only stages a choice; showing what Enter actually stored
+            // is the difference between a confirmed section and an untouched one.
+            let stored = if type_labels {
+                session.model.type_labels.value.clone()
+            } else {
+                session
+                    .model
+                    .rollout_allowed_team_ids
+                    .value
+                    .as_ref()
+                    .map(|ids| ids.iter().map(|id| session.team_label(id)).collect())
+            };
+            lines.push(Line::from(match stored {
+                Some(values) if !values.is_empty() => format!("stored: {}", values.join(", ")),
+                Some(_) => "stored: none".to_owned(),
+                None => "stored: nothing yet - press Enter".to_owned(),
+            }));
         }
         OnboardingSection::Paths => {
             lines.push(Line::from(format!(
@@ -1369,12 +1526,22 @@ pub fn run_test_backend_with_catalog(
     catalog: ModelCatalog,
     events: impl IntoIterator<Item = KeyEvent>,
 ) -> Result<(OnboardingEditorResult, Buffer)> {
+    run_test_backend_with_discovery(model, catalog, OnboardingDiscovery::default(), events)
+}
+
+#[cfg(test)]
+pub fn run_test_backend_with_discovery(
+    model: OnboardingModel,
+    catalog: ModelCatalog,
+    discovery: OnboardingDiscovery,
+    events: impl IntoIterator<Item = KeyEvent>,
+) -> Result<(OnboardingEditorResult, Buffer)> {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend)?;
     let (_response_tx, mut response_rx) = unbounded_channel::<DiscoveryResponse>();
     let mut session = EditorSession::new(
         model,
-        OnboardingDiscovery::default(),
+        discovery,
         catalog,
         env::temp_dir().join(format!(
             "spire-onboarding-test-{}.jsonl",
@@ -1484,6 +1651,134 @@ mod tests {
         assert!(
             !screen.contains("ultra"),
             "ultra is not offered for the narrower model: {screen}"
+        );
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn empty_catalog() -> ModelCatalog {
+        ModelCatalog {
+            version: "test".to_owned(),
+            providers: BTreeMap::new(),
+        }
+    }
+
+    /// One name Spire recognises and one it does not, so a cycle that only walked
+    /// the ranked suggestions would visibly stall.
+    fn discovery_fixture() -> (OnboardingDiscovery, OnboardingModel) {
+        let team = spire_application::LinearTeamSummary {
+            id: "team-uuid".to_owned(),
+            key: "ENG".to_owned(),
+            name: "Engineering".to_owned(),
+        };
+        let configuration = LinearTeamConfiguration {
+            team: team.clone(),
+            states: vec![
+                spire_application::LinearWorkflowState {
+                    id: "state-ready".to_owned(),
+                    name: "Ready".to_owned(),
+                    category: spire_application::LinearStateCategory::Unstarted,
+                },
+                spire_application::LinearWorkflowState {
+                    id: "state-bespoke".to_owned(),
+                    name: "Awaiting hardware".to_owned(),
+                    category: spire_application::LinearStateCategory::Unstarted,
+                },
+            ],
+            estimates: spire_application::LinearEstimateScale {
+                kind: "fibonacci".to_owned(),
+                points: vec![1, 2, 3, 5],
+            },
+        };
+        let discovery = OnboardingDiscovery {
+            teams: vec![team],
+            team_configurations: BTreeMap::from([("team-uuid".to_owned(), configuration)]),
+            failures: BTreeMap::new(),
+        };
+        let mut model = OnboardingModel::empty();
+        model.team_id = Editable::complete("team-uuid".to_owned());
+        model.workflow_states.insert(
+            LinearStateKind::Ready,
+            Editable::complete("state-ready".to_owned()),
+        );
+        (discovery, model)
+    }
+
+    #[test]
+    fn workflow_states_render_names_and_cycle_past_the_suggestions() {
+        let (discovery, model) = discovery_fixture();
+        let open = [key(KeyCode::Down), key(KeyCode::Enter)];
+
+        let (_, buffer) = run_test_backend_with_discovery(
+            model.clone(),
+            empty_catalog(),
+            discovery.clone(),
+            open,
+        )
+        .unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("Ready") && !screen.contains("state-ready"),
+            "the operator sees the state name, not its opaque ID: {screen}"
+        );
+
+        let cycle = open.into_iter().chain([key(KeyCode::Enter)]);
+        let (_, buffer) =
+            run_test_backend_with_discovery(model, empty_catalog(), discovery, cycle).unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("Awaiting hardware"),
+            "a state Spire cannot name-match is still reachable: {screen}"
+        );
+    }
+
+    #[test]
+    fn complexity_classes_are_editable_per_estimate_point() {
+        let (discovery, model) = discovery_fixture();
+        // Home -> complexity, then cycle the first estimate's class.
+        let events = [
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+        ];
+        let (_, buffer) =
+            run_test_backend_with_discovery(model, empty_catalog(), discovery, events).unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("1 -> Medium"),
+            "enter advances the highlighted point off its suggested class: {screen}"
+        );
+    }
+
+    #[test]
+    fn rollout_teams_are_named_and_kept_apart_from_type_labels() {
+        let (discovery, mut model) = discovery_fixture();
+        model.type_labels = Editable::complete(vec!["type:bug".to_owned()]);
+        // Home -> rollout, toggle the only team, confirm.
+        let events = [
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            key(KeyCode::Char(' ')),
+            key(KeyCode::Enter),
+        ];
+        let (_, buffer) =
+            run_test_backend_with_discovery(model, empty_catalog(), discovery, events).unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("Engineering (ENG)") && !screen.contains("team-uuid"),
+            "rollout names teams by key, not by UUID: {screen}"
+        );
+        assert!(
+            !screen.contains("type:bug"),
+            "type labels do not leak into the rollout allowlist: {screen}"
         );
     }
 
