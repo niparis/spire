@@ -903,7 +903,7 @@ impl EditorSession {
                 let _ = self.trace.mutation(
                     section.as_str(),
                     "effort",
-                    serde_json::json!(format!("{:?}", selection.effort).to_ascii_lowercase()),
+                    serde_json::json!(selection.effort.as_str()),
                     false,
                 );
             }
@@ -1138,9 +1138,42 @@ fn section_widget<'a>(
                 session.model.reviewer.value.as_ref()
             };
             if let Some(selection) = selection {
-                lines.push(Line::from(format!("provider: {}", selection.provider)));
-                lines.push(Line::from(format!("model: {}", selection.model)));
-                lines.push(Line::from(format!("effort: {:?}", selection.effort)));
+                let cursor = |row: usize| {
+                    if row == session.section_index {
+                        ">"
+                    } else {
+                        " "
+                    }
+                };
+                lines.push(Line::from(format!(
+                    "{} provider: {}",
+                    cursor(0),
+                    selection.provider
+                )));
+                lines.push(Line::from(format!(
+                    "{} model:    {}",
+                    cursor(1),
+                    selection.model
+                )));
+                // The accepted levels are shown because they are a property of
+                // the model: changing the model above changes this list.
+                let efforts = session
+                    .catalog
+                    .efforts_for(&selection.provider, &selection.model)
+                    .iter()
+                    .map(|effort| {
+                        if *effort == selection.effort {
+                            format!("[{effort}]")
+                        } else {
+                            effort.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                lines.push(Line::from(format!("{} effort:   {}", cursor(2), efforts)));
+                lines.push(Line::from(
+                    "enter cycles the selected row; o types a model outside the catalog",
+                ));
                 if (section == OnboardingSection::Maker
                     && session
                         .model
@@ -1320,16 +1353,29 @@ pub fn run_test_backend(
     model: OnboardingModel,
     events: impl IntoIterator<Item = KeyEvent>,
 ) -> Result<(OnboardingEditorResult, Buffer)> {
+    run_test_backend_with_catalog(
+        model,
+        ModelCatalog {
+            version: "test".to_owned(),
+            providers: BTreeMap::new(),
+        },
+        events,
+    )
+}
+
+#[cfg(test)]
+pub fn run_test_backend_with_catalog(
+    model: OnboardingModel,
+    catalog: ModelCatalog,
+    events: impl IntoIterator<Item = KeyEvent>,
+) -> Result<(OnboardingEditorResult, Buffer)> {
     let backend = TestBackend::new(100, 30);
     let mut terminal = Terminal::new(backend)?;
     let (_response_tx, mut response_rx) = unbounded_channel::<DiscoveryResponse>();
     let mut session = EditorSession::new(
         model,
         OnboardingDiscovery::default(),
-        ModelCatalog {
-            version: "test".to_owned(),
-            providers: BTreeMap::new(),
-        },
+        catalog,
         env::temp_dir().join(format!(
             "spire-onboarding-test-{}.jsonl",
             std::process::id()
@@ -1374,6 +1420,72 @@ pub fn make_test_events(events: &[HeadlessEvent]) -> Vec<KeyEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rendered(buffer: &Buffer) -> String {
+        buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn the_maker_section_shows_a_cursor_and_only_the_selected_model_s_efforts() {
+        let catalog = ModelCatalog {
+            version: "test".to_owned(),
+            providers: BTreeMap::from([(
+                "codex".to_owned(),
+                vec![
+                    spire_application::CatalogModel {
+                        id: "wide-model".to_owned(),
+                        default_effort: spire_domain::Effort::Medium,
+                        efforts: vec![spire_domain::Effort::Medium, spire_domain::Effort::Ultra],
+                    },
+                    spire_application::CatalogModel {
+                        id: "narrow-model".to_owned(),
+                        default_effort: spire_domain::Effort::Low,
+                        efforts: vec![spire_domain::Effort::Low],
+                    },
+                ],
+            )]),
+        };
+        let mut model = OnboardingModel::empty();
+        model.maker.value = Some(spire_application::HarnessSelection {
+            provider: HarnessId::new("codex").unwrap(),
+            model: ModelId::new("wide-model").unwrap(),
+            effort: spire_domain::Effort::Ultra,
+        });
+
+        // Home -> Maker, then move the cursor onto the model row.
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let open_maker = [
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Down),
+            key(KeyCode::Enter),
+            key(KeyCode::Down),
+        ];
+
+        let (_, buffer) =
+            run_test_backend_with_catalog(model.clone(), catalog.clone(), open_maker).unwrap();
+        let screen = rendered(&buffer);
+        assert!(screen.contains("model:"), "maker rows render: {screen}");
+        assert!(
+            screen.contains("[ultra]"),
+            "the selected effort is marked among the model's own levels: {screen}"
+        );
+
+        // Cycling the model onto the narrower entry must drop ultra from the
+        // offered levels rather than carry it to a model that rejects it.
+        let cycle_model = open_maker.into_iter().chain([key(KeyCode::Enter)]);
+        let (_, buffer) = run_test_backend_with_catalog(model, catalog, cycle_model).unwrap();
+        let screen = rendered(&buffer);
+        assert!(screen.contains("narrow-model"), "model cycled: {screen}");
+        assert!(
+            !screen.contains("ultra"),
+            "ultra is not offered for the narrower model: {screen}"
+        );
+    }
 
     #[test]
     fn test_backend_renders_without_the_credential_sentinel() {
