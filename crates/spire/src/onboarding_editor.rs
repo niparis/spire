@@ -37,6 +37,10 @@ use spire_application::{
     OnboardingSection, SectionStatus, rank_states, suggest_complexity_mapping,
 };
 use spire_domain::{ComplexityClass, HarnessId, ModelId};
+
+use crate::onboarding_view::{
+    ChoiceRow, CycleRow, ReadoutRow, SectionAction, SectionView, ToggleRow, Tone,
+};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 #[cfg(test)]
@@ -289,7 +293,13 @@ impl TerminalOnboardingEditor {
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend)?;
         let trace_path = self.paths.state_root.join("onboarding-trace.jsonl");
-        let mut session = EditorSession::new(model, discovery, self.catalog.clone(), trace_path)?;
+        let mut session = EditorSession::new(
+            model,
+            discovery,
+            self.catalog.clone(),
+            self.paths.clone(),
+            trace_path,
+        )?;
         let _ = self.request_tx.send(DiscoveryRequest::ListTeams);
         let result = run_session(
             &mut terminal,
@@ -378,10 +388,23 @@ enum Screen {
     QuitConfirmation,
 }
 
+const HARNESS_PROVIDER_ROW: usize = 0;
+const HARNESS_MODEL_ROW: usize = 1;
+const HARNESS_EFFORT_ROW: usize = 2;
+
+fn harness_role(section: OnboardingSection) -> OnboardingRole {
+    if section == OnboardingSection::Maker {
+        OnboardingRole::Maker
+    } else {
+        OnboardingRole::Reviewer
+    }
+}
+
 struct EditorSession {
     model: OnboardingModel,
     discovery: OnboardingDiscovery,
     catalog: ModelCatalog,
+    paths: spire_application::ResolvedPaths,
     screen: Screen,
     home_index: usize,
     section_index: usize,
@@ -398,6 +421,7 @@ impl EditorSession {
         model: OnboardingModel,
         discovery: OnboardingDiscovery,
         catalog: ModelCatalog,
+        paths: spire_application::ResolvedPaths,
         trace_path: PathBuf,
     ) -> Result<Self> {
         let selected_type_labels = model
@@ -431,6 +455,7 @@ impl EditorSession {
             model,
             discovery,
             catalog,
+            paths,
             screen: Screen::Home,
             home_index: 0,
             section_index: 0,
@@ -552,59 +577,186 @@ impl EditorSession {
         }
     }
 
-    fn section_items(&self, section: OnboardingSection) -> Vec<String> {
+    /// The single place a section's presentation is described. Everything after
+    /// this — cursor, navigation, key hints, layout — is shared by shape.
+    fn section_view(&self, section: OnboardingSection) -> SectionView {
         match section {
-            OnboardingSection::Linear => self
-                .discovery
-                .teams
-                .iter()
-                .map(|team| format!("{} ({})", team.name, team.key))
-                .collect(),
-            OnboardingSection::WorkflowStates => self
-                .discovery
-                .team_configurations
-                .get(self.model.team_id.value.as_deref().unwrap_or_default())
-                .map(|configuration| {
-                    configuration
-                        .states
-                        .iter()
-                        .map(|state| format!("{} [{:?}]", state.name, state.category))
-                        .collect()
-                })
-                .unwrap_or_default(),
-            OnboardingSection::Maker | OnboardingSection::Reviewer => {
-                let role = if section == OnboardingSection::Maker {
-                    OnboardingRole::Maker
-                } else {
-                    OnboardingRole::Reviewer
-                };
-                let provider = match role {
-                    OnboardingRole::Maker => self.model.maker.value.as_ref().map(|v| &v.provider),
-                    OnboardingRole::Reviewer => {
-                        self.model.reviewer.value.as_ref().map(|v| &v.provider)
-                    }
-                };
-                provider
-                    .map(|provider| {
-                        self.catalog
-                            .models_for(provider)
-                            .into_iter()
-                            .map(|model| model.to_string())
+            OnboardingSection::Linear => SectionView::Choose {
+                rows: self
+                    .discovery
+                    .teams
+                    .iter()
+                    .map(|team| ChoiceRow {
+                        label: format!("{} ({})", team.name, team.key),
+                        current: self.model.team_id.value.as_deref() == Some(team.id.as_str()),
+                    })
+                    .collect(),
+                empty: "no teams loaded yet - press r to fetch them from Linear".to_owned(),
+            },
+            OnboardingSection::WorkflowStates => SectionView::Cycle {
+                headers: ("spire role", "linear state"),
+                rows: LinearStateKind::ALL
+                    .into_iter()
+                    .map(|kind| CycleRow {
+                        name: kind.as_str().to_owned(),
+                        value: self
+                            .model
+                            .workflow_states
+                            .get(&kind)
+                            .and_then(|state| state.value.as_deref())
+                            .map(|state_id| self.state_label(state_id))
+                            .unwrap_or_else(|| "unbound".to_owned()),
+                        note: None,
+                    })
+                    .collect(),
+                empty: String::new(),
+            },
+            OnboardingSection::Complexity => SectionView::Cycle {
+                headers: ("linear estimate", "spire complexity"),
+                rows: self
+                    .model
+                    .complexity
+                    .value
+                    .as_ref()
+                    .map(|complexity| {
+                        complexity
+                            .mapping
+                            .iter()
+                            .map(|(estimate, class)| CycleRow {
+                                name: estimate.value().to_string(),
+                                value: format!("{class:?}"),
+                                note: None,
+                            })
                             .collect()
                     })
-                    .unwrap_or_default()
-            }
-            OnboardingSection::TypeLabels => spire_application::DEFAULT_TYPE_LABELS
-                .iter()
-                .map(|label| (*label).to_owned())
-                .collect(),
-            OnboardingSection::Rollout => self
-                .discovery
-                .teams
-                .iter()
-                .map(|team| format!("{} ({})", team.name, team.key))
-                .collect(),
-            _ => Vec::new(),
+                    .unwrap_or_default(),
+                empty: "select a Linear team with an estimate scale first".to_owned(),
+            },
+            OnboardingSection::Maker | OnboardingSection::Reviewer => self.harness_view(section),
+            OnboardingSection::TypeLabels => SectionView::Toggle {
+                rows: spire_application::DEFAULT_TYPE_LABELS
+                    .iter()
+                    .map(|label| ToggleRow {
+                        label: (*label).to_owned(),
+                        selected: self.selected_type_labels.contains(*label),
+                    })
+                    .collect(),
+                empty: String::new(),
+            },
+            OnboardingSection::Rollout => SectionView::Toggle {
+                rows: self
+                    .discovery
+                    .teams
+                    .iter()
+                    .map(|team| ToggleRow {
+                        label: format!("{} ({})", team.name, team.key),
+                        selected: self.selected_rollout_teams.contains(&team.id),
+                    })
+                    .collect(),
+                empty: "no teams loaded yet - open the linear section and press r".to_owned(),
+            },
+            OnboardingSection::Paths => SectionView::Readout {
+                rows: vec![
+                    ReadoutRow::plain(format!(
+                        "configuration file: {}",
+                        self.paths.config_file.display()
+                    )),
+                    ReadoutRow::plain(format!(
+                        "state directory:    {}",
+                        self.paths.state_root.display()
+                    )),
+                    ReadoutRow::plain(format!("session trace:      {}", self.trace.path.display())),
+                    ReadoutRow::toned(
+                        format!("installation profile: {:?}", self.paths.profile),
+                        Tone::Muted,
+                    ),
+                    ReadoutRow::toned(
+                        "These are resolved before the editor starts. Change them with --config or SPIRE_HOME and re-run.",
+                        Tone::Muted,
+                    ),
+                ],
+                activates: None,
+            },
+            OnboardingSection::ReviewAndWrite => SectionView::Readout {
+                rows: self
+                    .model
+                    .statuses()
+                    .into_iter()
+                    .map(|(section, status)| {
+                        let tone = match status {
+                            SectionStatus::Complete => Tone::Good,
+                            SectionStatus::Stale { .. } => Tone::Warning,
+                            SectionStatus::Incomplete { .. } => Tone::Normal,
+                        };
+                        ReadoutRow::toned(
+                            format!("{}: {}", section.as_str(), status_summary(&status)),
+                            tone,
+                        )
+                    })
+                    .chain(self.model.off_catalog_roles.iter().map(|role| {
+                        ReadoutRow::toned(
+                            format!("{role:?} model: explicitly off-catalog / unverified"),
+                            Tone::Warning,
+                        )
+                    }))
+                    .collect(),
+                activates: Some("write"),
+            },
+        }
+    }
+
+    fn harness_view(&self, section: OnboardingSection) -> SectionView {
+        let role = harness_role(section);
+        let Some(selection) = self.role_selection(role) else {
+            return SectionView::Cycle {
+                headers: ("setting", "value"),
+                rows: Vec::new(),
+                empty: "no harness selected yet".to_owned(),
+            };
+        };
+        // The accepted levels are listed because they are a property of the
+        // model: changing the model above changes this row's alternatives.
+        let efforts = self
+            .catalog
+            .efforts_for(&selection.provider, &selection.model)
+            .iter()
+            .map(|effort| {
+                if *effort == selection.effort {
+                    format!("[{effort}]")
+                } else {
+                    effort.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let off_catalog = self.model.off_catalog_roles.contains(&role);
+        SectionView::Cycle {
+            headers: ("setting", "value"),
+            rows: vec![
+                CycleRow {
+                    name: "provider".to_owned(),
+                    value: selection.provider.to_string(),
+                    note: None,
+                },
+                CycleRow {
+                    name: "model".to_owned(),
+                    value: selection.model.to_string(),
+                    note: off_catalog.then(|| "off-catalog / unverified".to_owned()),
+                },
+                CycleRow {
+                    name: "effort".to_owned(),
+                    value: efforts,
+                    note: None,
+                },
+            ],
+            empty: String::new(),
+        }
+    }
+
+    fn role_selection(&self, role: OnboardingRole) -> Option<&spire_application::HarnessSelection> {
+        match role {
+            OnboardingRole::Maker => self.model.maker.value.as_ref(),
+            OnboardingRole::Reviewer => self.model.reviewer.value.as_ref(),
         }
     }
 
@@ -614,15 +766,6 @@ impl EditorSession {
             .value
             .as_deref()
             .and_then(|team_id| self.discovery.team_configurations.get(team_id))
-    }
-
-    fn team_label(&self, team_id: &str) -> String {
-        self.discovery
-            .teams
-            .iter()
-            .find(|team| team.id == team_id)
-            .map(|team| format!("{} ({})", team.name, team.key))
-            .unwrap_or_else(|| team_id.to_owned())
     }
 
     /// Linear identifies a state by an opaque UUID, but an operator recognises it
@@ -703,77 +846,162 @@ impl EditorSession {
             self.screen = Screen::Home;
             return false;
         }
-        if section == OnboardingSection::Linear
-            && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R'))
-        {
-            let request = self
-                .model
-                .team_id
-                .value
-                .clone()
-                .map(|team_id| DiscoveryRequest::TeamConfiguration { team_id })
-                .unwrap_or(DiscoveryRequest::ListTeams);
-            let _ = request_tx.send(request);
-            return false;
-        }
-        if key.code == KeyCode::Char('r') || key.code == KeyCode::Char('R') {
-            self.screen = Screen::Section(OnboardingSection::ReviewAndWrite);
+        if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
+            if section == OnboardingSection::Linear || section == OnboardingSection::Rollout {
+                let _ = request_tx.send(DiscoveryRequest::ListTeams);
+                if let Some(team_id) = self.model.team_id.value.clone() {
+                    let _ = request_tx.send(DiscoveryRequest::TeamConfiguration { team_id });
+                }
+                self.error = Some("Refreshing from Linear...".to_owned());
+            } else {
+                self.screen = Screen::Section(OnboardingSection::ReviewAndWrite);
+            }
             return false;
         }
         // A section marked stale by an upstream change may already hold the right
         // answer. Without this the only way to clear the mark is to alter a value
         // and alter it back.
-        if key.code == KeyCode::Char('a') || key.code == KeyCode::Char('A') {
+        if matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A')) {
             self.model.confirm_section(section);
             let _ =
                 self.trace
                     .mutation(section.as_str(), "accepted", serde_json::json!(true), true);
             return false;
         }
-        match section {
-            OnboardingSection::Linear => {
-                let items = self.section_items(section);
-                match key.code {
-                    KeyCode::Up => self.section_index = self.section_index.saturating_sub(1),
-                    KeyCode::Down => {
-                        self.section_index =
-                            (self.section_index + 1).min(items.len().saturating_sub(1))
-                    }
-                    KeyCode::Enter if !items.is_empty() => {
-                        let team_id = self.discovery.teams[self.section_index].id.clone();
-                        self.select_team(team_id, request_tx);
-                    }
-                    KeyCode::Char('r') => {
-                        let team_id = self.model.team_id.value.clone();
-                        if let Some(team_id) = team_id {
-                            let _ =
-                                request_tx.send(DiscoveryRequest::TeamConfiguration { team_id });
-                        } else {
-                            let _ = request_tx.send(DiscoveryRequest::ListTeams);
-                        }
-                    }
-                    _ => {}
+        if matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+            && matches!(
+                section,
+                OnboardingSection::Maker | OnboardingSection::Reviewer
+            )
+            && self.section_index == HARNESS_MODEL_ROW
+        {
+            self.enter_off_catalog_model(section);
+            return false;
+        }
+        if section == OnboardingSection::Complexity {
+            self.seed_complexity_suggestion();
+        }
+        let view = self.section_view(section);
+        let mut cursor = self.section_index;
+        let action = view.navigate(key.code, &mut cursor);
+        self.section_index = cursor;
+        match action {
+            Some(action) => self.apply_section_action(section, action, request_tx),
+            None => false,
+        }
+    }
+
+    /// The only per-section mutation logic left. Navigation, cursor bounds, and
+    /// rendering are the view's concern.
+    fn apply_section_action(
+        &mut self,
+        section: OnboardingSection,
+        action: SectionAction,
+        request_tx: &UnboundedSender<DiscoveryRequest>,
+    ) -> bool {
+        match (section, action) {
+            (OnboardingSection::Linear, SectionAction::Activate(index)) => {
+                if let Some(team) = self.discovery.teams.get(index) {
+                    let team_id = team.id.clone();
+                    self.select_team(team_id, request_tx);
                 }
             }
-            OnboardingSection::WorkflowStates => self.handle_workflow_key(key),
-            OnboardingSection::Complexity => self.handle_complexity_key(key),
-            OnboardingSection::Maker | OnboardingSection::Reviewer => {
-                self.handle_harness_key(section, key)
+            (OnboardingSection::WorkflowStates, SectionAction::Activate(index)) => {
+                self.cycle_workflow_state(LinearStateKind::ALL[index])
             }
-            OnboardingSection::TypeLabels | OnboardingSection::Rollout => {
-                self.handle_multi_key(section, key)
+            (OnboardingSection::Complexity, SectionAction::Activate(index)) => {
+                self.cycle_complexity_class(index)
             }
-            OnboardingSection::Paths => {}
-            OnboardingSection::ReviewAndWrite => {
-                if key.code == KeyCode::Enter {
-                    match self.model.validate() {
-                        Ok(()) => return true,
-                        Err(error) => self.error = Some(format!("write refused: {error}")),
+            (
+                OnboardingSection::Maker | OnboardingSection::Reviewer,
+                SectionAction::Activate(row),
+            ) => self.cycle_harness_row(section, row),
+            (OnboardingSection::TypeLabels, SectionAction::Toggle(index)) => {
+                if let Some(label) = spire_application::DEFAULT_TYPE_LABELS.get(index) {
+                    let label = (*label).to_owned();
+                    if !self.selected_type_labels.insert(label.clone()) {
+                        self.selected_type_labels.remove(&label);
                     }
+                    self.model.type_labels =
+                        Editable::complete(self.selected_type_labels.iter().cloned().collect());
+                    self.model.confirm_section(section);
+                    let _ = self.trace.mutation(
+                        section.as_str(),
+                        "labels",
+                        serde_json::json!(self.model.type_labels.value),
+                        false,
+                    );
                 }
             }
+            (OnboardingSection::Rollout, SectionAction::Toggle(index)) => {
+                if let Some(team) = self.discovery.teams.get(index) {
+                    let team_id = team.id.clone();
+                    if !self.selected_rollout_teams.insert(team_id.clone()) {
+                        self.selected_rollout_teams.remove(&team_id);
+                    }
+                    self.model.rollout_allowed_team_ids =
+                        Editable::complete(self.selected_rollout_teams.iter().cloned().collect());
+                    let _ = self.trace.mutation(
+                        section.as_str(),
+                        "allowed_team_ids",
+                        serde_json::json!(self.model.rollout_allowed_team_ids.value),
+                        false,
+                    );
+                }
+            }
+            (OnboardingSection::ReviewAndWrite, SectionAction::Activate(_)) => {
+                match self.model.validate() {
+                    Ok(()) => return true,
+                    Err(error) => self.error = Some(format!("write refused: {error}")),
+                }
+            }
+            _ => {}
         }
         false
+    }
+
+    /// Suggestions lead, but every state stays reachable: a workspace whose
+    /// names Spire does not recognise would otherwise offer nothing to cycle.
+    fn cycle_workflow_state(&mut self, kind: LinearStateKind) {
+        let Some(configuration) = self.team_configuration() else {
+            return;
+        };
+        let mut candidates = rank_states(kind, &configuration.states);
+        let unranked = (0..configuration.states.len())
+            .filter(|index| !candidates.contains(index))
+            .collect::<Vec<_>>();
+        candidates.extend(unranked);
+        let current = self
+            .model
+            .workflow_states
+            .get(&kind)
+            .and_then(|state| state.value.as_deref());
+        let candidate_index = current
+            .and_then(|value| {
+                candidates
+                    .iter()
+                    .position(|index| configuration.states[*index].id == value)
+            })
+            .map(|index| (index + 1) % candidates.len().max(1))
+            .unwrap_or(0);
+        let Some(state_id) = candidates
+            .get(candidate_index)
+            .and_then(|index| configuration.states.get(*index))
+            .map(|state| state.id.clone())
+        else {
+            return;
+        };
+        self.model
+            .workflow_states
+            .insert(kind, Editable::complete(state_id.clone()));
+        self.model
+            .confirm_section(OnboardingSection::WorkflowStates);
+        let _ = self.trace.mutation(
+            OnboardingSection::WorkflowStates.as_str(),
+            kind.as_str(),
+            serde_json::json!(state_id),
+            false,
+        );
     }
 
     /// The mapping is derived from the team's estimate scale so the operator has
@@ -792,255 +1020,120 @@ impl EditorSession {
         }
     }
 
-    fn handle_complexity_key(&mut self, key: KeyEvent) {
-        self.seed_complexity_suggestion();
+    fn cycle_complexity_class(&mut self, index: usize) {
         let Some(complexity) = self.model.complexity.value.as_mut() else {
             return;
         };
-        match key.code {
-            KeyCode::Up => self.section_index = self.section_index.saturating_sub(1),
-            KeyCode::Down => {
-                self.section_index =
-                    (self.section_index + 1).min(complexity.mapping.len().saturating_sub(1))
-            }
-            KeyCode::Enter => {
-                let Some((estimate, class)) = complexity
-                    .mapping
-                    .iter()
-                    .nth(self.section_index)
-                    .map(|(estimate, class)| (*estimate, *class))
-                else {
-                    return;
-                };
-                let next = ComplexityClass::ALL[(ComplexityClass::ALL
-                    .iter()
-                    .position(|candidate| *candidate == class)
-                    .unwrap_or(0)
-                    + 1)
-                    % ComplexityClass::ALL.len()];
-                complexity.mapping.insert(estimate, next);
-                self.model.confirm_section(OnboardingSection::Complexity);
-                let _ = self.trace.mutation(
-                    OnboardingSection::Complexity.as_str(),
-                    "mapping",
-                    serde_json::json!({ "estimate": estimate.value(), "class": format!("{next:?}") }),
-                    false,
-                );
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_workflow_key(&mut self, key: KeyEvent) {
-        let Some(configuration) = self
-            .model
-            .team_id
-            .value
-            .as_deref()
-            .and_then(|team_id| self.discovery.team_configurations.get(team_id))
+        let Some((estimate, class)) = complexity
+            .mapping
+            .iter()
+            .nth(index)
+            .map(|(estimate, class)| (*estimate, *class))
         else {
             return;
         };
-        match key.code {
-            KeyCode::Up => self.section_index = self.section_index.saturating_sub(1),
-            KeyCode::Down => {
-                self.section_index = (self.section_index + 1).min(LinearStateKind::ALL.len() - 1)
+        let next = ComplexityClass::ALL[(ComplexityClass::ALL
+            .iter()
+            .position(|candidate| *candidate == class)
+            .unwrap_or(0)
+            + 1)
+            % ComplexityClass::ALL.len()];
+        complexity.mapping.insert(estimate, next);
+        self.model.confirm_section(OnboardingSection::Complexity);
+        let _ = self.trace.mutation(
+            OnboardingSection::Complexity.as_str(),
+            "mapping",
+            serde_json::json!({ "estimate": estimate.value(), "class": format!("{next:?}") }),
+            false,
+        );
+    }
+
+    fn enter_off_catalog_model(&mut self, section: OnboardingSection) {
+        let role = harness_role(section);
+        match prompt_off_catalog_model() {
+            Ok(model) => {
+                self.model.set_model_catalog_state(role, true);
+                let chosen = model.to_string();
+                let outcome = self.model.set_model(role, model, &self.catalog);
+                let _ = self.trace.invalidation(&outcome);
+                let _ = self.trace.mutation(
+                    section.as_str(),
+                    "model",
+                    serde_json::json!({
+                        "model": chosen,
+                        "catalog_resolution": "off_catalog",
+                    }),
+                    false,
+                );
             }
-            KeyCode::Enter => {
-                let kind = LinearStateKind::ALL[self.section_index];
-                // Suggestions lead, but every state stays reachable: a workspace
-                // whose names Spire does not recognise would otherwise offer the
-                // operator nothing to cycle through.
-                let mut candidates = rank_states(kind, &configuration.states);
-                let unranked = (0..configuration.states.len())
-                    .filter(|index| !candidates.contains(index))
-                    .collect::<Vec<_>>();
-                candidates.extend(unranked);
-                let current = self
-                    .model
-                    .workflow_states
-                    .get(&kind)
-                    .and_then(|state| state.value.as_deref());
-                let candidate_index = current
-                    .and_then(|value| {
-                        candidates
-                            .iter()
-                            .position(|index| configuration.states[*index].id == value)
-                    })
-                    .map(|index| (index + 1) % candidates.len().max(1))
-                    .unwrap_or(0);
-                if let Some(state_index) = candidates.get(candidate_index)
-                    && let Some(state) = configuration.states.get(*state_index)
-                {
-                    self.model
-                        .workflow_states
-                        .insert(kind, Editable::complete(state.id.clone()));
-                    self.model
-                        .confirm_section(OnboardingSection::WorkflowStates);
-                    let _ = self.trace.mutation(
-                        OnboardingSection::WorkflowStates.as_str(),
-                        kind.as_str(),
-                        serde_json::json!(state.id),
-                        false,
-                    );
-                }
-            }
-            // Space is deliberately ignored for this single-select screen.
-            KeyCode::Char(' ') => {}
-            _ => {}
+            Err(error) => self.error = Some(error.to_string()),
         }
     }
 
-    fn handle_harness_key(&mut self, section: OnboardingSection, key: KeyEvent) {
-        let role = if section == OnboardingSection::Maker {
-            OnboardingRole::Maker
-        } else {
-            OnboardingRole::Reviewer
-        };
-        let selection = match role {
-            OnboardingRole::Maker => self.model.maker.value.clone(),
-            OnboardingRole::Reviewer => self.model.reviewer.value.clone(),
-        };
-        let Some(mut selection) = selection else {
+    fn cycle_harness_row(&mut self, section: OnboardingSection, row: usize) {
+        let role = harness_role(section);
+        let Some(selection) = self.role_selection(role).cloned() else {
             return;
         };
-        match key.code {
-            KeyCode::Up => {
-                self.section_index = self.section_index.saturating_sub(1);
-            }
-            KeyCode::Down => {
-                self.section_index = (self.section_index + 1).min(2);
-            }
-            KeyCode::Char('o') | KeyCode::Char('O') if self.section_index == 1 => {
-                match prompt_off_catalog_model() {
-                    Ok(model) => {
-                        self.model.set_model_catalog_state(role, true);
-                        let chosen = model.to_string();
-                        let outcome = self.model.set_model(role, model, &self.catalog);
-                        let _ = self.trace.invalidation(&outcome);
-                        let _ = self.trace.mutation(
-                            section.as_str(),
-                            "model",
-                            serde_json::json!({
-                                "model": chosen,
-                                "catalog_resolution": "off_catalog",
-                            }),
-                            false,
-                        );
-                    }
-                    Err(error) => self.error = Some(error.to_string()),
-                }
-            }
-            KeyCode::Enter if self.section_index == 0 => {
+        match row {
+            HARNESS_PROVIDER_ROW => {
                 let providers = ["codex", "claude-code"];
                 let current = providers
                     .iter()
-                    .position(|p| *p == selection.provider.as_str())
+                    .position(|provider| *provider == selection.provider.as_str())
                     .unwrap_or(0);
-                let next = (current + 1) % providers.len();
-                if let Ok(provider) = HarnessId::new(providers[next]) {
-                    selection.provider = provider;
-                    selection.model = ModelId::new("unselected").expect("literal model is valid");
-                    if role == OnboardingRole::Maker {
-                        let outcome = self.model.set_maker_provider(selection.provider.clone());
-                        let _ = self.trace.invalidation(&outcome);
-                    } else {
-                        let outcome = self.model.set_reviewer_provider(selection.provider.clone());
-                        let _ = self.trace.invalidation(&outcome);
-                    }
-                    let _ = self.trace.mutation(
-                        section.as_str(),
-                        "provider",
-                        serde_json::json!(selection.provider.as_str()),
-                        false,
-                    );
-                }
+                let Ok(provider) = HarnessId::new(providers[(current + 1) % providers.len()])
+                else {
+                    return;
+                };
+                let outcome = if role == OnboardingRole::Maker {
+                    self.model.set_maker_provider(provider.clone())
+                } else {
+                    self.model.set_reviewer_provider(provider.clone())
+                };
+                let _ = self.trace.invalidation(&outcome);
+                let _ = self.trace.mutation(
+                    section.as_str(),
+                    "provider",
+                    serde_json::json!(provider.as_str()),
+                    false,
+                );
             }
-            KeyCode::Enter if self.section_index == 1 => {
-                if let Some(model) = self
+            HARNESS_MODEL_ROW => {
+                let Some(model) = self
                     .catalog
                     .next_model(&selection.provider, &selection.model)
-                {
-                    self.model.set_model_catalog_state(role, false);
-                    let chosen = model.to_string();
-                    let outcome = self.model.set_model(role, model, &self.catalog);
-                    let effort_reset = !outcome.invalidated.is_empty();
-                    let _ = self.trace.invalidation(&outcome);
-                    let _ = self.trace.mutation(
-                        section.as_str(),
-                        "model",
-                        serde_json::json!({
-                            "model": chosen,
-                            "effort_reset_to_model_default": effort_reset,
-                        }),
-                        true,
-                    );
-                }
+                else {
+                    return;
+                };
+                self.model.set_model_catalog_state(role, false);
+                let chosen = model.to_string();
+                let outcome = self.model.set_model(role, model, &self.catalog);
+                let effort_reset = !outcome.invalidated.is_empty();
+                let _ = self.trace.invalidation(&outcome);
+                let _ = self.trace.mutation(
+                    section.as_str(),
+                    "model",
+                    serde_json::json!({
+                        "model": chosen,
+                        "effort_reset_to_model_default": effort_reset,
+                    }),
+                    true,
+                );
             }
-            KeyCode::Enter if self.section_index == 2 => {
-                selection.effort = self.catalog.next_effort(
+            HARNESS_EFFORT_ROW => {
+                let effort = self.catalog.next_effort(
                     &selection.provider,
                     &selection.model,
                     selection.effort,
                 );
-                self.model.set_effort(role, selection.effort);
+                self.model.set_effort(role, effort);
                 let _ = self.trace.mutation(
                     section.as_str(),
                     "effort",
-                    serde_json::json!(selection.effort.as_str()),
+                    serde_json::json!(effort.as_str()),
                     false,
                 );
-            }
-            // Space has no meaning in provider/model/effort lists.
-            KeyCode::Char(' ') => {}
-            _ => {}
-        }
-    }
-
-    fn handle_multi_key(&mut self, section: OnboardingSection, key: KeyEvent) {
-        let items = self.section_items(section);
-        match key.code {
-            KeyCode::Up => self.section_index = self.section_index.saturating_sub(1),
-            KeyCode::Down => {
-                self.section_index = (self.section_index + 1).min(items.len().saturating_sub(1))
-            }
-            KeyCode::Char(' ') if !items.is_empty() => {
-                let (item, chosen) = if section == OnboardingSection::TypeLabels {
-                    (
-                        items[self.section_index].clone(),
-                        &mut self.selected_type_labels,
-                    )
-                } else {
-                    (
-                        self.discovery.teams[self.section_index].id.clone(),
-                        &mut self.selected_rollout_teams,
-                    )
-                };
-                if !chosen.insert(item.clone()) {
-                    chosen.remove(&item);
-                }
-            }
-            KeyCode::Enter => {
-                if section == OnboardingSection::TypeLabels {
-                    self.model.type_labels =
-                        Editable::complete(self.selected_type_labels.iter().cloned().collect());
-                    self.model.confirm_section(section);
-                    let _ = self.trace.mutation(
-                        section.as_str(),
-                        "labels",
-                        serde_json::json!(self.model.type_labels.value),
-                        false,
-                    );
-                } else {
-                    self.model.rollout_allowed_team_ids =
-                        Editable::complete(self.selected_rollout_teams.iter().cloned().collect());
-                    let _ = self.trace.mutation(
-                        section.as_str(),
-                        "allowed_team_ids",
-                        serde_json::json!(self.model.rollout_allowed_team_ids.value),
-                        false,
-                    );
-                }
             }
             _ => {}
         }
@@ -1113,7 +1206,7 @@ fn render_session(frame: &mut ratatui::Frame<'_>, session: &EditorSession) {
             Style::default().fg(Color::Yellow),
         ))
     } else {
-        footer_for(session.screen)
+        footer_for(session)
     };
     frame.render_widget(
         Paragraph::new(footer).block(Block::default().borders(Borders::TOP)),
@@ -1157,18 +1250,17 @@ fn home_widget<'a>(session: &'a EditorSession, _area: Rect) -> impl Widget + 'a 
     )
 }
 
-/// What the section decides and how it is driven. Shown in the section itself
-/// because a section name alone does not say what the value is used for.
+/// What the section decides. Shown in the section itself because a name like
+/// "rollout" does not say what the value is used for; the key hints come from
+/// the view so they cannot promise an interaction the shape does not offer.
 fn section_help(section: OnboardingSection) -> &'static str {
     match section {
-        OnboardingSection::Linear => {
-            "The Linear team Spire watches for tickets. Enter selects; r refetches."
-        }
+        OnboardingSection::Linear => "The Linear team Spire watches for tickets.",
         OnboardingSection::WorkflowStates => {
-            "Which of this team's states Spire reads and writes as it moves a ticket. Enter cycles the highlighted role through every state."
+            "Which of this team's Linear states Spire reads and writes as it moves a ticket."
         }
         OnboardingSection::Complexity => {
-            "Maps each Linear estimate point to the complexity class that picks a harness. Enter cycles the highlighted point; a accepts the suggestion."
+            "Maps each Linear estimate point to the Spire complexity class that picks a harness."
         }
         OnboardingSection::Maker => {
             "The harness that writes the implementation. Its provider must differ from the reviewer's."
@@ -1176,15 +1268,13 @@ fn section_help(section: OnboardingSection) -> &'static str {
         OnboardingSection::Reviewer => {
             "The harness that reviews the implementation, on a different provider than the maker."
         }
-        OnboardingSection::TypeLabels => {
-            "Ticket labels Spire treats as work types. Space toggles; Enter stores the selection."
-        }
+        OnboardingSection::TypeLabels => "Linear labels Spire treats as work types.",
         OnboardingSection::Rollout => {
-            "Teams allowed to trigger automation. Everything stays inert until a team is listed here. Space toggles; Enter stores the selection."
+            "Teams allowed to trigger automation. Everything stays inert until a team is listed here."
         }
-        OnboardingSection::Paths => "Where the configuration file will be written.",
+        OnboardingSection::Paths => "Where this run will read and write files.",
         OnboardingSection::ReviewAndWrite => {
-            "Every section's state. Enter writes the configuration; a refusal names the section."
+            "Every section's state. A refusal to write names the section responsible."
         }
     }
 }
@@ -1194,211 +1284,13 @@ fn section_widget<'a>(
     section: OnboardingSection,
     _area: Rect,
 ) -> impl Widget + 'a {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            section.as_str().to_string(),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            section_help(section),
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-    match section {
-        OnboardingSection::Linear => {
-            lines.push(Line::from(format!(
-                "credential: {}",
-                if session.model.credential_verified {
-                    "verified"
-                } else {
-                    "missing"
-                }
-            )));
-            lines.push(Line::from("Select a team:"));
-            for (index, item) in session.section_items(section).iter().enumerate() {
-                lines.push(Line::from(format!(
-                    "{} {}",
-                    if index == session.section_index {
-                        ">"
-                    } else {
-                        " "
-                    },
-                    item
-                )));
-            }
-        }
-        OnboardingSection::WorkflowStates => {
-            for kind in LinearStateKind::ALL {
-                let value = session
-                    .model
-                    .workflow_states
-                    .get(&kind)
-                    .and_then(|state| state.value.as_deref())
-                    .map(|state_id| session.state_label(state_id))
-                    .unwrap_or_else(|| "unbound".to_owned());
-                lines.push(Line::from(format!(
-                    "{} {:<14} {}",
-                    if kind as usize == session.section_index {
-                        ">"
-                    } else {
-                        " "
-                    },
-                    format!("{}:", kind.as_str()),
-                    value
-                )));
-            }
-        }
-        OnboardingSection::Complexity => {
-            if let Some(complexity) = session.model.complexity.value.as_ref() {
-                lines.push(Line::from(format!(
-                    "estimate scale: {} ({:?})",
-                    complexity.scale.kind, complexity.scale.points
-                )));
-                for (index, (estimate, class)) in complexity.mapping.iter().enumerate() {
-                    lines.push(Line::from(format!(
-                        "{} {} -> {class:?}",
-                        if index == session.section_index {
-                            ">"
-                        } else {
-                            " "
-                        },
-                        estimate.value()
-                    )));
-                }
-            } else {
-                lines.push(Line::from("waiting for a usable estimate scale"));
-            }
-        }
-        OnboardingSection::Maker | OnboardingSection::Reviewer => {
-            let selection = if section == OnboardingSection::Maker {
-                session.model.maker.value.as_ref()
-            } else {
-                session.model.reviewer.value.as_ref()
-            };
-            if let Some(selection) = selection {
-                let cursor = |row: usize| {
-                    if row == session.section_index {
-                        ">"
-                    } else {
-                        " "
-                    }
-                };
-                lines.push(Line::from(format!(
-                    "{} provider: {}",
-                    cursor(0),
-                    selection.provider
-                )));
-                lines.push(Line::from(format!(
-                    "{} model:    {}",
-                    cursor(1),
-                    selection.model
-                )));
-                // The accepted levels are shown because they are a property of
-                // the model: changing the model above changes this list.
-                let efforts = session
-                    .catalog
-                    .efforts_for(&selection.provider, &selection.model)
-                    .iter()
-                    .map(|effort| {
-                        if *effort == selection.effort {
-                            format!("[{effort}]")
-                        } else {
-                            effort.to_string()
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                lines.push(Line::from(format!("{} effort:   {}", cursor(2), efforts)));
-                lines.push(Line::from(
-                    "enter cycles the selected row; o types a model outside the catalog",
-                ));
-                if (section == OnboardingSection::Maker
-                    && session
-                        .model
-                        .off_catalog_roles
-                        .contains(&OnboardingRole::Maker))
-                    || (section == OnboardingSection::Reviewer
-                        && session
-                            .model
-                            .off_catalog_roles
-                            .contains(&OnboardingRole::Reviewer))
-                {
-                    lines.push(Line::from(Span::styled(
-                        "model is explicitly off-catalog / unverified",
-                        Style::default().fg(Color::Yellow),
-                    )));
-                }
-            } else {
-                lines.push(Line::from("choose provider, model, and effort"));
-            }
-        }
-        OnboardingSection::TypeLabels | OnboardingSection::Rollout => {
-            let type_labels = section == OnboardingSection::TypeLabels;
-            let chosen = if type_labels {
-                &session.selected_type_labels
-            } else {
-                &session.selected_rollout_teams
-            };
-            for (index, item) in session.section_items(section).iter().enumerate() {
-                let selected = chosen.contains(if type_labels {
-                    item
-                } else {
-                    &session.discovery.teams[index].id
-                });
-                lines.push(Line::from(format!(
-                    "{} [{}] {}",
-                    if index == session.section_index {
-                        ">"
-                    } else {
-                        " "
-                    },
-                    if selected { "x" } else { " " },
-                    item
-                )));
-            }
-            // Toggling only stages a choice; showing what Enter actually stored
-            // is the difference between a confirmed section and an untouched one.
-            let stored = if type_labels {
-                session.model.type_labels.value.clone()
-            } else {
-                session
-                    .model
-                    .rollout_allowed_team_ids
-                    .value
-                    .as_ref()
-                    .map(|ids| ids.iter().map(|id| session.team_label(id)).collect())
-            };
-            lines.push(Line::from(match stored {
-                Some(values) if !values.is_empty() => format!("stored: {}", values.join(", ")),
-                Some(_) => "stored: none".to_owned(),
-                None => "stored: nothing yet - press Enter".to_owned(),
-            }));
-        }
-        OnboardingSection::Paths => {
-            lines.push(Line::from(format!(
-                "configuration: {}",
-                session.paths_display()
-            )));
-        }
-        OnboardingSection::ReviewAndWrite => {
-            for (section, status) in session.model.statuses() {
-                lines.push(Line::from(format!(
-                    "{}: {}",
-                    section.as_str(),
-                    status_summary(&status)
-                )));
-            }
-            for role in &session.model.off_catalog_roles {
-                lines.push(Line::from(Span::styled(
-                    format!("{role:?} model: explicitly off-catalog / unverified"),
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
-            lines.push(Line::from(
-                "Enter writes only when every blocking section is complete.",
-            ));
-        }
-    }
+    let view = session.section_view(section);
+    let mut lines = vec![Line::from(Span::styled(
+        section_help(section),
+        Style::default().fg(Color::DarkGray),
+    ))];
+    lines.push(Line::from(""));
+    lines.extend(view.lines(session.section_index));
     Paragraph::new(Text::from(lines)).block(
         Block::default()
             .borders(Borders::ALL)
@@ -1407,10 +1299,6 @@ fn section_widget<'a>(
 }
 
 impl EditorSession {
-    fn paths_display(&self) -> String {
-        self.trace.path.display().to_string()
-    }
-
     fn record_committed_values(&mut self) -> Result<()> {
         let record =
             |trace: &mut TraceWriter,
@@ -1482,15 +1370,33 @@ fn quit_widget(_area: Rect) -> impl Widget {
         .block(Block::default().borders(Borders::ALL).title("Quit"))
 }
 
-fn footer_for(screen: Screen) -> Line<'static> {
-    match screen {
-        Screen::Home => Line::from("↑/↓ move  Enter open  r review  q/Esc quit"),
+/// The section's own shape supplies the keys it answers to, so the footer
+/// cannot advertise an interaction the component does not implement.
+fn footer_for(session: &EditorSession) -> Line<'static> {
+    match session.screen {
+        Screen::Home => Line::from("up/down move  Enter open  r review  q/Esc quit"),
         Screen::QuitConfirmation => Line::from("Enter/y abandon  Esc/n return"),
-        Screen::Section(OnboardingSection::TypeLabels | OnboardingSection::Rollout) => {
-            Line::from("↑/↓ move  Space toggle  Enter confirm  Esc back  r review")
+        Screen::Section(section) => {
+            let mut hints = vec![session.section_view(section).key_hint().to_owned()];
+            if matches!(
+                section,
+                OnboardingSection::Linear | OnboardingSection::Rollout
+            ) {
+                hints.push("r refresh from Linear".to_owned());
+            } else {
+                hints.push("r review".to_owned());
+            }
+            if matches!(
+                section,
+                OnboardingSection::Maker | OnboardingSection::Reviewer
+            ) {
+                hints.push("o off-catalog model".to_owned());
+            }
+            hints.push("a accept as-is".to_owned());
+            hints.push("Esc back".to_owned());
+            hints.retain(|hint| !hint.is_empty());
+            Line::from(hints.join("  "))
         }
-        Screen::Section(OnboardingSection::Paths) => Line::from("Esc back  r review"),
-        Screen::Section(_) => Line::from("↑/↓ move  Enter confirm  Esc back  r review"),
     }
 }
 
@@ -1543,6 +1449,7 @@ pub fn run_test_backend_with_discovery(
         model,
         discovery,
         catalog,
+        spire_application::ResolvedPaths::system(),
         env::temp_dir().join(format!(
             "spire-onboarding-test-{}.jsonl",
             std::process::id()
@@ -1636,7 +1543,10 @@ mod tests {
         let (_, buffer) =
             run_test_backend_with_catalog(model.clone(), catalog.clone(), open_maker).unwrap();
         let screen = rendered(&buffer);
-        assert!(screen.contains("model:"), "maker rows render: {screen}");
+        assert!(
+            screen.contains("model    = wide-model"),
+            "maker rows render: {screen}"
+        );
         assert!(
             screen.contains("[ultra]"),
             "the selected effort is marked among the model's own levels: {screen}"
@@ -1748,8 +1658,34 @@ mod tests {
             run_test_backend_with_discovery(model, empty_catalog(), discovery, events).unwrap();
         let screen = rendered(&buffer);
         assert!(
-            screen.contains("1 -> Medium"),
+            screen.contains("1               = Medium"),
             "enter advances the highlighted point off its suggested class: {screen}"
+        );
+    }
+
+    /// The home cursor persists between visits, so walking to a section has to
+    /// start by pinning it to the top.
+    fn open_section(section: OnboardingSection) -> Vec<KeyEvent> {
+        let mut events = vec![key(KeyCode::Up); OnboardingSection::ALL.len()];
+        events.extend(vec![key(KeyCode::Down); section as usize]);
+        events.push(key(KeyCode::Enter));
+        events
+    }
+
+    #[test]
+    fn a_toggle_survives_leaving_the_section_without_a_confirmation_key() {
+        let (discovery, model) = discovery_fixture();
+        // Toggle, leave with Esc, come back: Enter is never pressed.
+        let events = open_section(OnboardingSection::Rollout)
+            .into_iter()
+            .chain([key(KeyCode::Char(' ')), key(KeyCode::Esc)])
+            .chain(open_section(OnboardingSection::Rollout));
+        let (_, buffer) =
+            run_test_backend_with_discovery(model, empty_catalog(), discovery, events).unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("[x] Engineering (ENG)"),
+            "the toggle was written straight to the model: {screen}"
         );
     }
 
@@ -1757,28 +1693,53 @@ mod tests {
     fn rollout_teams_are_named_and_kept_apart_from_type_labels() {
         let (discovery, mut model) = discovery_fixture();
         model.type_labels = Editable::complete(vec!["type:bug".to_owned()]);
-        // Home -> rollout, toggle the only team, confirm.
-        let events = [
-            key(KeyCode::Down),
-            key(KeyCode::Down),
-            key(KeyCode::Down),
-            key(KeyCode::Down),
-            key(KeyCode::Down),
-            key(KeyCode::Down),
-            key(KeyCode::Enter),
-            key(KeyCode::Char(' ')),
-            key(KeyCode::Enter),
-        ];
+        let events = open_section(OnboardingSection::Rollout)
+            .into_iter()
+            .chain([key(KeyCode::Char(' '))]);
         let (_, buffer) =
             run_test_backend_with_discovery(model, empty_catalog(), discovery, events).unwrap();
         let screen = rendered(&buffer);
         assert!(
-            screen.contains("Engineering (ENG)") && !screen.contains("team-uuid"),
-            "rollout names teams by key, not by UUID: {screen}"
+            screen.contains("[x] Engineering (ENG)") && !screen.contains("team-uuid"),
+            "space alone marks the team, named by key rather than UUID: {screen}"
         );
         assert!(
             !screen.contains("type:bug"),
             "type labels do not leak into the rollout allowlist: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_linear_section_marks_the_team_already_selected() {
+        let (discovery, model) = discovery_fixture();
+        let (_, buffer) = run_test_backend_with_discovery(
+            model,
+            empty_catalog(),
+            discovery,
+            open_section(OnboardingSection::Linear),
+        )
+        .unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("(*) Engineering (ENG)"),
+            "a chosen team is distinguishable from a merely highlighted one: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_paths_section_names_the_configuration_file_it_will_write() {
+        let (discovery, model) = discovery_fixture();
+        let (_, buffer) = run_test_backend_with_discovery(
+            model,
+            empty_catalog(),
+            discovery,
+            open_section(OnboardingSection::Paths),
+        )
+        .unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("configuration file: /etc/spire/spire.yaml"),
+            "the section reports the destination rather than the trace file: {screen}"
         );
     }
 

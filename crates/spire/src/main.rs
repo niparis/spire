@@ -2,6 +2,7 @@
 
 mod init;
 mod onboarding_editor;
+mod onboarding_view;
 mod runtime_paths;
 mod user_service;
 
