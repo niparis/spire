@@ -32,6 +32,9 @@ Cloudflare Tunnel, Linear, and GitHub. Application code is not scaffolded yet.
   contracts, state machines, persistence, and failure policy.
 - The ordered roadmap is [`docs/sprints/README.md`](docs/sprints/README.md). Work
   from the current sprint document and satisfy its entry and exit criteria.
+- Before changing a terminal interface, read
+  [`docs/architecture/tui-composition.md`](docs/architecture/tui-composition.md).
+  No new interface element without a component.
 - Before preparing, tagging, publishing, promoting, or recovering a release, read
   [`docs/runbooks/release-promotion.md`](docs/runbooks/release-promotion.md) and
   follow its authority, verification, and rollback gates.
