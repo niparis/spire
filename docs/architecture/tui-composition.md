@@ -33,7 +33,7 @@ variant per shape and no variant per section.
 
 | Variant | The question it asks | Keys | Used by |
 |---|---|---|---|
-| `Choose` | pick exactly one from a discovered list | up/down, Enter | `linear` |
+| `Choose` | pick exactly one from a list | up/down, Enter | the home menu, `linear` |
 | `Toggle` | pick any number from a fixed list | up/down, Space | `type_labels`, `rollout` |
 | `Cycle` | advance a named setting through fixed alternatives | up/down, Enter | `workflow_states`, `complexity`, `maker`, `reviewer` |
 | `Readout` | show text, offer at most one action | Enter, when `activates` is set | `paths`, `review_and_write` |
@@ -42,12 +42,19 @@ variant per shape and no variant per section.
 section is the only confirmation there is. The other shapes report an action and
 the adapter decides what it means.
 
+The home menu is a `Choose` like any other. It is not a section, but it is a
+list with a cursor, so it uses the same component — which is what stops the
+cursor from looking one way there and another way inside a section.
+
 Rows are described by `ChoiceRow`, `ToggleRow`, `CycleRow`, and `ReadoutRow`.
-`ChoiceRow::current` marks the value the model already holds, so an operator can
-tell a highlighted row from a chosen one. `CycleRow::note` carries a per-row
-caveat, such as an off-catalog model. `ReadoutRow::tone` selects from `Tone`
-(`Normal`, `Muted`, `Warning`, `Good`) rather than a raw ratatui `Style`, so
-colour stays a vocabulary rather than a decision made per call site.
+`ChoiceRow::marker` is a `RowMarker`: either `Chosen(bool)`, the radio marker
+that distinguishes a chosen value from a merely highlighted one, or
+`Status(glyph, tone)`, the progress marker a navigated menu shows instead. They
+are variants rather than two fields because a row has one or the other, never
+both. `CycleRow::note` carries a per-row caveat, such as an off-catalog model.
+`ReadoutRow::tone` and `RowMarker::Status` both take a `Tone` (`Normal`,
+`Muted`, `Warning`, `Good`) rather than a raw ratatui `Style`, so colour stays a
+vocabulary rather than a decision made per call site.
 
 `SectionView::Cycle` names both of its columns (`headers`). A two-column table
 whose columns are unlabelled cannot tell the operator which side is Spire's
@@ -65,7 +72,13 @@ vocabulary and which side came from Linear.
   Nothing else.
 - The footer MUST take its key hints from `SectionView::key_hint`. A screen may
   not advertise a key its shape does not implement.
-- A bespoke ratatui code path for one section is a defect, not a shortcut.
+- A bespoke ratatui code path for one screen is a defect, not a shortcut.
+
+There is one standing exception. `quit_widget` is a static two-line
+confirmation with no cursor, no rows, and no model access; it answers `y`/`Esc`
+and nothing else. Giving it a component would add a variant used once to
+describe a `Paragraph`. If a second confirmation ever appears, add a `Confirm`
+variant then and adopt both.
 
 The rule exists because the editor was first written the other way. There was a
 match arm per section in the renderer, another in the key handler, and a third
@@ -94,12 +107,17 @@ There is exactly one path from a key press to a model mutation.
 ```
 crossterm KeyEvent
 └── EditorSession::handle_key          global keys (Ctrl-C -> quit confirmation)
+    ├── handle_home_key                menu keys (r, q/Esc)
+    │   └── SectionView::navigate      via home_view()
+    │       └── open_section           reset cursor, seed suggestions
     └── handle_section_key             section-scoped keys (Esc, r, a, o)
         └── SectionView::navigate      cursor movement + clamping
             │                          -> Option<SectionAction>
             └── apply_section_action   the only place a key mutates the model
                 └── OnboardingModel    validation, staleness, statuses
 ```
+
+Both screens reach `navigate` the same way. Neither moves a cursor itself.
 
 `SectionView::navigate` resolves navigation itself and never reports it upward;
 the adapter only ever sees `SectionAction::Activate` or `SectionAction::Toggle`.
@@ -267,3 +285,10 @@ the upgrade should not touch this design.
 5. Add one arm to `section_help` describing what the section decides.
 6. Nothing else. If step 3 forces you to reach for a new shape, add the variant
    to `onboarding_view.rs` with its navigation, hint, and rendering first.
+
+Steps 3 to 5 are compiler-enforced: all three match on `OnboardingSection`
+without a catch-all, so a section that reaches none of them does not build. That
+is deliberate. `apply_section_action` used to end in `_ => {}`, which meant a
+section could be added, rendered, navigated, and be silently inert on Enter —
+the same class of defect as the four above, and invisible for the same reason.
+`HarnessRow` is an enum rather than row-index constants for the same purpose.
