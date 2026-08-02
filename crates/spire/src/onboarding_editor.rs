@@ -24,9 +24,9 @@ use ratatui::{
     Terminal,
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Widget},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 use serde::Serialize;
 use spire_adapters::linear::LinearReadAdapter;
@@ -39,7 +39,7 @@ use spire_application::{
 use spire_domain::{ComplexityClass, HarnessId, ModelId};
 
 use crate::onboarding_view::{
-    ChoiceRow, CycleRow, ReadoutRow, SectionAction, SectionView, ToggleRow, Tone,
+    ChoiceRow, CycleRow, ReadoutRow, RowMarker, SectionAction, SectionView, ToggleRow, Tone,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -388,9 +388,23 @@ enum Screen {
     QuitConfirmation,
 }
 
-const HARNESS_PROVIDER_ROW: usize = 0;
-const HARNESS_MODEL_ROW: usize = 1;
-const HARNESS_EFFORT_ROW: usize = 2;
+/// The rows of a harness section, in the order `harness_view` builds them. An
+/// enum rather than index constants so that adding a row cannot leave a silent
+/// gap in the code that cycles them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HarnessRow {
+    Provider,
+    Model,
+    Effort,
+}
+
+impl HarnessRow {
+    const ALL: [Self; 3] = [Self::Provider, Self::Model, Self::Effort];
+
+    fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.get(index).copied()
+    }
+}
 
 fn harness_role(section: OnboardingSection) -> OnboardingRole {
     if section == OnboardingSection::Maker {
@@ -579,6 +593,30 @@ impl EditorSession {
 
     /// The single place a section's presentation is described. Everything after
     /// this — cursor, navigation, key hints, layout — is shared by shape.
+    /// The home menu is a `Choose` over sections, so it navigates, renders its
+    /// cursor, and advertises its keys the same way every list inside a section
+    /// does. It was once hand-built, and drifted: the cursor was a reversed row
+    /// here and a `>` everywhere else.
+    fn home_view(&self) -> SectionView {
+        let statuses = self.model.statuses();
+        SectionView::Choose {
+            rows: OnboardingSection::ALL
+                .iter()
+                .map(|section| ChoiceRow {
+                    label: section.as_str().to_owned(),
+                    marker: match statuses.get(section) {
+                        Some(SectionStatus::Complete) => RowMarker::Status("✓", Tone::Good),
+                        Some(SectionStatus::Stale { .. }) => RowMarker::Status("!", Tone::Warning),
+                        Some(SectionStatus::Incomplete { .. }) | None => {
+                            RowMarker::Status("○", Tone::Muted)
+                        }
+                    },
+                })
+                .collect(),
+            empty: String::new(),
+        }
+    }
+
     fn section_view(&self, section: OnboardingSection) -> SectionView {
         match section {
             OnboardingSection::Linear => SectionView::Choose {
@@ -588,7 +626,9 @@ impl EditorSession {
                     .iter()
                     .map(|team| ChoiceRow {
                         label: format!("{} ({})", team.name, team.key),
-                        current: self.model.team_id.value.as_deref() == Some(team.id.as_str()),
+                        marker: RowMarker::Chosen(
+                            self.model.team_id.value.as_deref() == Some(team.id.as_str()),
+                        ),
                     })
                     .collect(),
                 empty: "no teams loaded yet - press r to fetch them from Linear".to_owned(),
@@ -814,26 +854,35 @@ impl EditorSession {
 
     fn handle_home_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Up => self.home_index = self.home_index.saturating_sub(1),
-            KeyCode::Down => {
-                self.home_index = (self.home_index + 1).min(OnboardingSection::ALL.len() - 1)
-            }
-            KeyCode::Enter => {
-                self.section_index = 0;
-                let section = OnboardingSection::ALL[self.home_index];
-                if section == OnboardingSection::Complexity {
-                    self.seed_complexity_suggestion();
-                }
-                self.screen = Screen::Section(section);
-            }
             KeyCode::Char('r') | KeyCode::Char('R') => {
                 self.home_index = OnboardingSection::ReviewAndWrite as usize;
-                self.screen = Screen::Section(OnboardingSection::ReviewAndWrite);
+                self.open_section(OnboardingSection::ReviewAndWrite);
+                return false;
             }
-            KeyCode::Char('q') | KeyCode::Esc => self.screen = Screen::QuitConfirmation,
+            KeyCode::Char('q') | KeyCode::Esc => {
+                self.screen = Screen::QuitConfirmation;
+                return false;
+            }
             _ => {}
         }
+        let view = self.home_view();
+        let mut cursor = self.home_index;
+        let action = view.navigate(key.code, &mut cursor);
+        self.home_index = cursor;
+        if let Some(SectionAction::Activate(index)) = action {
+            self.open_section(OnboardingSection::ALL[index]);
+        }
         false
+    }
+
+    /// Opening a section resets its cursor and seeds whatever suggestion the
+    /// section needs before it has any rows to show.
+    fn open_section(&mut self, section: OnboardingSection) {
+        self.section_index = 0;
+        if section == OnboardingSection::Complexity {
+            self.seed_complexity_suggestion();
+        }
+        self.screen = Screen::Section(section);
     }
 
     fn handle_section_key(
@@ -873,7 +922,7 @@ impl EditorSession {
                 section,
                 OnboardingSection::Maker | OnboardingSection::Reviewer
             )
-            && self.section_index == HARNESS_MODEL_ROW
+            && HarnessRow::from_index(self.section_index) == Some(HarnessRow::Model)
         {
             self.enter_off_catalog_model(section);
             return false;
@@ -899,24 +948,27 @@ impl EditorSession {
         action: SectionAction,
         request_tx: &UnboundedSender<DiscoveryRequest>,
     ) -> bool {
-        match (section, action) {
-            (OnboardingSection::Linear, SectionAction::Activate(index)) => {
+        let (SectionAction::Activate(index) | SectionAction::Toggle(index)) = action;
+        // Matched on the section alone, without a catch-all: a section added
+        // without its mutation must not compile. A shape that cannot produce the
+        // action it is given is already impossible — the view decides both.
+        match section {
+            OnboardingSection::Linear => {
                 if let Some(team) = self.discovery.teams.get(index) {
                     let team_id = team.id.clone();
                     self.select_team(team_id, request_tx);
                 }
             }
-            (OnboardingSection::WorkflowStates, SectionAction::Activate(index)) => {
+            OnboardingSection::WorkflowStates => {
                 self.cycle_workflow_state(LinearStateKind::ALL[index])
             }
-            (OnboardingSection::Complexity, SectionAction::Activate(index)) => {
-                self.cycle_complexity_class(index)
+            OnboardingSection::Complexity => self.cycle_complexity_class(index),
+            OnboardingSection::Maker | OnboardingSection::Reviewer => {
+                if let Some(row) = HarnessRow::from_index(index) {
+                    self.cycle_harness_row(section, row);
+                }
             }
-            (
-                OnboardingSection::Maker | OnboardingSection::Reviewer,
-                SectionAction::Activate(row),
-            ) => self.cycle_harness_row(section, row),
-            (OnboardingSection::TypeLabels, SectionAction::Toggle(index)) => {
+            OnboardingSection::TypeLabels => {
                 if let Some(label) = spire_application::DEFAULT_TYPE_LABELS.get(index) {
                     let label = (*label).to_owned();
                     if !self.selected_type_labels.insert(label.clone()) {
@@ -933,7 +985,7 @@ impl EditorSession {
                     );
                 }
             }
-            (OnboardingSection::Rollout, SectionAction::Toggle(index)) => {
+            OnboardingSection::Rollout => {
                 if let Some(team) = self.discovery.teams.get(index) {
                     let team_id = team.id.clone();
                     if !self.selected_rollout_teams.insert(team_id.clone()) {
@@ -949,13 +1001,11 @@ impl EditorSession {
                     );
                 }
             }
-            (OnboardingSection::ReviewAndWrite, SectionAction::Activate(_)) => {
-                match self.model.validate() {
-                    Ok(()) => return true,
-                    Err(error) => self.error = Some(format!("write refused: {error}")),
-                }
-            }
-            _ => {}
+            OnboardingSection::Paths => {}
+            OnboardingSection::ReviewAndWrite => match self.model.validate() {
+                Ok(()) => return true,
+                Err(error) => self.error = Some(format!("write refused: {error}")),
+            },
         }
         false
     }
@@ -1070,13 +1120,13 @@ impl EditorSession {
         }
     }
 
-    fn cycle_harness_row(&mut self, section: OnboardingSection, row: usize) {
+    fn cycle_harness_row(&mut self, section: OnboardingSection, row: HarnessRow) {
         let role = harness_role(section);
         let Some(selection) = self.role_selection(role).cloned() else {
             return;
         };
         match row {
-            HARNESS_PROVIDER_ROW => {
+            HarnessRow::Provider => {
                 let providers = ["codex", "claude-code"];
                 let current = providers
                     .iter()
@@ -1099,7 +1149,7 @@ impl EditorSession {
                     false,
                 );
             }
-            HARNESS_MODEL_ROW => {
+            HarnessRow::Model => {
                 let Some(model) = self
                     .catalog
                     .next_model(&selection.provider, &selection.model)
@@ -1121,7 +1171,7 @@ impl EditorSession {
                     true,
                 );
             }
-            HARNESS_EFFORT_ROW => {
+            HarnessRow::Effort => {
                 let effort = self.catalog.next_effort(
                     &selection.provider,
                     &selection.model,
@@ -1135,7 +1185,6 @@ impl EditorSession {
                     false,
                 );
             }
-            _ => {}
         }
     }
 }
@@ -1214,36 +1263,8 @@ fn render_session(frame: &mut ratatui::Frame<'_>, session: &EditorSession) {
     );
 }
 
-fn home_widget<'a>(session: &'a EditorSession, _area: Rect) -> impl Widget + 'a {
-    let statuses = session.model.statuses();
-    let items = OnboardingSection::ALL
-        .iter()
-        .map(|section| {
-            let status = statuses.get(section);
-            let (marker, style) = match status {
-                Some(SectionStatus::Complete) => ("✓", Style::default().fg(Color::Green)),
-                Some(SectionStatus::Incomplete { .. }) | None => {
-                    ("○", Style::default().fg(Color::DarkGray))
-                }
-                Some(SectionStatus::Stale { .. }) => (
-                    "!",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            };
-            let item_style = if *section as usize == session.home_index {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, style),
-                Span::styled(format!("  {}", section.as_str()), item_style),
-            ]))
-        })
-        .collect::<Vec<_>>();
-    List::new(items).block(
+fn home_widget(session: &EditorSession, _area: Rect) -> impl Widget {
+    Paragraph::new(Text::from(session.home_view().lines(session.home_index))).block(
         Block::default()
             .borders(Borders::ALL)
             .title("Spire onboarding"),
@@ -1374,7 +1395,10 @@ fn quit_widget(_area: Rect) -> impl Widget {
 /// cannot advertise an interaction the component does not implement.
 fn footer_for(session: &EditorSession) -> Line<'static> {
     match session.screen {
-        Screen::Home => Line::from("up/down move  Enter open  r review  q/Esc quit"),
+        Screen::Home => Line::from(format!(
+            "{}  r review  q/Esc quit",
+            session.home_view().key_hint()
+        )),
         Screen::QuitConfirmation => Line::from("Enter/y abandon  Esc/n return"),
         Screen::Section(section) => {
             let mut hints = vec![session.section_view(section).key_hint().to_owned()];
@@ -1723,6 +1747,43 @@ mod tests {
         assert!(
             screen.contains("(*) Engineering (ENG)"),
             "a chosen team is distinguishable from a merely highlighted one: {screen}"
+        );
+    }
+
+    /// The home menu was hand-built once and marked its cursor with a reversed
+    /// row while every section marked it with `>`. Sharing the component is what
+    /// keeps the two from disagreeing again.
+    #[test]
+    fn the_home_menu_marks_its_cursor_the_way_a_section_does() {
+        let (discovery, model) = discovery_fixture();
+        let (_, buffer) = run_test_backend_with_discovery(
+            model,
+            empty_catalog(),
+            discovery,
+            vec![key(KeyCode::Up); OnboardingSection::ALL.len()],
+        )
+        .unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("> ○ linear") || screen.contains("> ✓ linear"),
+            "the home cursor is the section cursor: {screen}"
+        );
+    }
+
+    #[test]
+    fn the_home_menu_navigates_and_opens_through_the_component() {
+        let (discovery, model) = discovery_fixture();
+        let (_, buffer) = run_test_backend_with_discovery(
+            model,
+            empty_catalog(),
+            discovery,
+            open_section(OnboardingSection::Rollout),
+        )
+        .unwrap();
+        let screen = rendered(&buffer);
+        assert!(
+            screen.contains("Engineering (ENG)") && !screen.contains("Spire onboarding"),
+            "walking the home cursor and pressing Enter opens the section it names: {screen}"
         );
     }
 

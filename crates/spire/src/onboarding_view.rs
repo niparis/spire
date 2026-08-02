@@ -35,12 +35,23 @@ impl Tone {
     }
 }
 
-/// Pick exactly one entry. `current` marks the value already held by the model
-/// so an operator can tell a highlighted row from a chosen one.
+/// How a `Choose` row reports its own state, shown left of the label. The two
+/// forms are exclusive: a menu entry has progress, a candidate value does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowMarker {
+    /// Whether this row holds the value the model already has, so an operator
+    /// can tell a highlighted row from a chosen one.
+    Chosen(bool),
+    /// A glyph for a list that is navigated rather than chosen, such as the
+    /// per-section progress on the home menu.
+    Status(&'static str, Tone),
+}
+
+/// Pick exactly one entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceRow {
     pub label: String,
-    pub current: bool,
+    pub marker: RowMarker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,12 +180,16 @@ impl SectionView {
                 rows.iter()
                     .enumerate()
                     .map(|(index, row)| {
-                        Line::from(format!(
-                            "{}{} {}",
-                            cursor_at(index),
-                            if row.current { "(*)" } else { "( )" },
-                            row.label
-                        ))
+                        let (glyph, style) = match row.marker {
+                            RowMarker::Chosen(true) => ("(*)", Style::default()),
+                            RowMarker::Chosen(false) => ("( )", Style::default()),
+                            RowMarker::Status(glyph, tone) => (glyph, tone.style()),
+                        };
+                        Line::from(vec![
+                            Span::raw(cursor_at(index)),
+                            Span::styled(glyph, style),
+                            Span::raw(format!(" {}", row.label)),
+                        ])
                     })
                     .collect()
             }
